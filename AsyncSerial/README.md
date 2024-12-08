@@ -1,6 +1,12 @@
 # AsyncSerial Documentation
 
-This document provides a comprehensive overview of the **AsyncSerial** library, which enables **asynchronous, thread-safe serial communication**. The library is designed to support **multiple logical streams** over a single physical UART using **proxies**, while maintaining full compatibility with Arduino's Serial interface.
+## Introduction
+
+`AsyncSerial` is a library designed to manage asynchronous and multi-proxy communication over a single hardware serial port on Arduino-compatible platforms. The primary goals are:
+
+- Provide a **drop-in replacement for the Serial API**, ensuring existing code using `Serial` can be easily adapted.
+- Allow **multiple logical streams** (`SerialProxy`) to share a single physical UART, each with its own buffers and configuration.
+- Offer cooperative, non-blocking behavior for operations like `flush()` to prevent system stalls and improve responsiveness in multi-tasking or RTOS environments.
 
 ## Core Concepts
 
@@ -24,8 +30,6 @@ Non-blocking collaboration between threads through `CooperativeLock`, ideal for:
 - Cooperative multitasking
 - Interrupt-driven architectures
 
----
-
 ## Key Components
 
 ### 1. AsyncSerial
@@ -47,82 +51,155 @@ protocol.print("AT+COMMAND\r\n");
 
 ### 3. RingBuffer & CooperativeLock
 Thread-safe mechanisms ensuring non-blocking resource access
-- RingBuffer between AsyncSerial and proxies (replicates the existing Serial ring buffer to each proxy)
-- CooperativeLock to protect the flush() operation (ensures each proxy can flush its own buffer + ensures its content is actually sent to the physical serial, without race condition)
+- `RingBuffer` between `AsyncSerial` and proxies (replicates the existing Serial ring buffer to each proxy)
+- `CooperativeLock` to protect the `flush()` operation (ensures each proxy can flush its own buffer + ensures its content is actually sent to the physical serial, without race condition)
 
-## Proxy Usage Examples
+# AsyncSerial Documentation
 
-### Basic Usage (Drop-in Replacement)
+## Drop-in Serial Compatibility
+
+### Fully Compatible Methods
+SerialProxy implements all standard Serial/Stream methods:
 ```cpp
-// Instead of Serial.println():
-debugProxy.println("System started");  
+// Basic I/O
+int available()
+int read()
+int peek()
+size_t write(uint8_t)
+size_t write(const uint8_t*, size_t)
+void flush()
+int availableForWrite()
 
-// Instead of Serial.available() and Serial.read():
-if (protocolProxy.available()) {
-    char c = protocolProxy.read();
+// String operations
+String readString()
+String readStringUntil(char terminator)
+size_t readBytes(uint8_t *buffer, size_t length)
+size_t readBytesUntil(char terminator, uint8_t *buffer, size_t length)
+
+// Configuration
+void setTimeout(unsigned long timeout)
+unsigned long getTimeout()
+void begin(unsigned long baud)
+void begin(unsigned long baud, uint16_t config)
+void end()
+```
+
+### Placeholder Methods
+Some methods are implemented as no-ops for compatibility but don't provide functionality:
+```cpp
+bool find(char *target)                 // Always returns false
+bool find(uint8_t *target, size_t)      // Always returns false
+bool findUntil(char*, char*)            // Always returns false
+bool findUntil(uint8_t*, size_t, char*, size_t) // Always returns false
+float parseFloat()                      // Always returns 0.0
+long parseInt()                         // Always returns 0
+long parseInt(char skipChar)            // Always returns 0
+```
+
+### Key Differences from Serial
+
+1. **Configuration Methods**
+```cpp
+// These don't actually configure the hardware
+proxy.begin(9600);    // No effect - use AsyncSerial::getInstance().begin() instead
+proxy.end();          // No effect - use AsyncSerial::getInstance().end() instead
+```
+
+2. **Blocking Operations**
+```cpp
+// These methods block but maintain system responsiveness by calling poll()
+String response = proxy.readStringUntil('\n');  // Blocks with timeout
+size_t count = proxy.readBytes(buffer, size);   // Blocks with timeout
+```
+
+3. **Buffer Management**
+```cpp
+// Each proxy has its own fixed-size buffer
+SerialProxy<1024> proxy;  // Buffer size must be defined at compile time
+```
+
+## Thread Safety Considerations
+
+### Thread-Safe Operations
+```cpp
+// Always thread-safe
+AsyncSerial::getInstance()  // Thread-safe singleton access
+proxy.flush()              // Protected by CooperativeLock
+AsyncSerial::poll()        // Thread-safe when used as intended
+```
+
+### Non-Thread-Safe Operations
+```cpp
+// Must be called only during initialization
+AsyncSerial::begin()
+AsyncSerial::end()
+AsyncSerial::registerProxy()
+
+// Must be synchronized externally if called from multiple threads (but all the point of this implementation is to allow one individual proxy per thread, so if you need to share a proxy between threads, you're probably doing something wrong)
+proxy.write()
+proxy.read()
+proxy.available()
+```
+
+### Initialization Pattern
+```cpp
+// 0. Declare proxies as global objects
+SerialProxy<1024> debugProxy;
+SerialProxy<512> protocolProxy;
+
+void setup() {
+    // 1. Initialize AsyncSerial first (non-thread-safe)
+    AsyncSerial::getInstance().begin(115200);
+    
+    // 2. Register all proxies (non-thread-safe)
+    AsyncSerial::getInstance().registerProxy(&debugProxy);
+    AsyncSerial::getInstance().registerProxy(&protocolProxy);
+    
+    // 3. After this, thread-safe operations can begin
+    startTasks();  // If using RTOS
+}
+```
+
+### RTOS Usage Notes
+```cpp
+// Dedicated polling task (recommended)
+void serialPollTask(void* parameter) {
+    for (;;) {
+        AsyncSerial::getInstance().poll();
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
 }
 
-// Instead of Serial.readStringUntil():
-String response = protocolProxy.readStringUntil('\n');
-```
-
-### Advanced Usage
-```cpp
-// Custom buffer sizes for different needs
-SerialProxy<2048> debugProxy;    // Large buffer for debug logs
-SerialProxy<128> statusProxy;    // Small buffer for status updates
-SerialProxy<512> protocolProxy;  // Medium buffer for protocol
-
-// Independent delays
-SerialProxy<1024> fastProxy(1);    // 1ms between messages
-SerialProxy<1024> slowProxy(50);   // 50ms between messages
-```
-
-## Buffer Management and Flushing
-
-### Buffer Types
-Each proxy maintains two independent ring buffers:
-- TX buffer for outgoing data
-- RX buffer for incoming data
-
-### Flushing Behavior
-Both proxy flush and direct flush are blocking operations with timeout protection:
-
-1. **Proxy-Level Flush** (SerialProxy::flush)
-```cpp
-// Blocking flush via AsyncSerial
-debugProxy.flush();  // Blocks until complete or timeout
-```
-
-2. **Direct Flush** (AsyncSerial::flush)
-```cpp
-// Blocking flush with timeout
-bool success = AsyncSerial::getInstance().flush(&debugProxy);
-if (!success) {
-    // Handle timeout
+// Data handling task
+void dataTask(void* parameter) {
+    SerialProxy<512>& proxy = *((SerialProxy<512>*)parameter);
+    for (;;) {
+        // Read/write operations need external synchronization
+        taskENTER_CRITICAL();
+        if (proxy.available()) {
+            String data = proxy.readString();
+        }
+        taskEXIT_CRITICAL();
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 ```
 
-Key characteristics:
-- Both methods are blocking operations
-- Both include timeout protection (default 1000ms)
-- Both ensure all data is transmitted or timeout occurs
-- Both use CooperativeLock to manage access
-- While blocking, they continue to call poll() to maintain system responsiveness
-- Return false if timeout occurs, true if flush completes successfully
+### Best Practices for Thread Safety
 
-Typical use cases:
-```cpp
-// When you need to ensure all data is sent:
-debugProxy.println("Critical message");
-if (!AsyncSerial::getInstance().flush(&debugProxy)) {
-    // Handle timeout - data may not have been fully sent
-}
+1. **Initialization**
+   - Complete all AsyncSerial and proxy setup before starting threads/tasks
+   - Don't register new proxies after initialization
 
-// Or using proxy's flush method (identical behavior):
-debugProxy.println("Critical message");
-debugProxy.flush();  // Will block until complete or timeout
-```
+2. **Polling**
+   - Use a dedicated high-priority task for polling in RTOS
+   - Ensure consistent polling frequency
+   - Don't call poll() from interrupt contexts
+
+3. **Critical Sections**
+   - Protect read/write operations when sharing a proxy between tasks
+   - Keep critical sections short
+   - Use RTOS primitives for synchronization if needed
 
 ## State Machine
 

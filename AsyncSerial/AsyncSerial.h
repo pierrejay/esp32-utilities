@@ -95,10 +95,117 @@ public:
 
     void flush() override { AsyncSerial::getInstance().flush(this); }
 
+    // Méthodes de configuration
+    void begin(unsigned long baud) {
+        // Ne fait rien, l'initialisation doit être faite via AsyncSerial::getInstance().begin()
+    }
+    void begin(unsigned long baud, uint16_t config) {
+        // Ne fait rien, l'initialisation doit être faite via AsyncSerial::getInstance().begin()
+    }
+    void end() {
+        // Ne fait rien, la terminaison doit être faite via AsyncSerial::getInstance().end()
+    }
+
+    // Méthodes d'écriture supplémentaires pour la compatibilité
+    size_t write(const uint8_t *buffer, size_t size) override { 
+        return _txBuffer.write(buffer, size) ? size : 0; 
+    }
+
+    // Méthodes de configuration du timeout
+    void setTimeout(unsigned long timeout) { _timeout = timeout; }
+    unsigned long getTimeout() const { return _timeout; }
+
+    // Méthode manquante pour la compatibilité avec Stream
+    int availableForWrite() override {
+        return BUFFER_SIZE - _txBuffer.available();
+    }
+
+    // Méthodes de lecture en bloc avec timeout
+    size_t readBytes(uint8_t *buffer, size_t length) {
+        size_t count = 0;
+        unsigned long startMillis = millis();
+        
+        while (count < length) {
+            if (millis() - startMillis > _timeout) break;
+            
+            if (available()) {
+                buffer[count++] = read();
+                startMillis = millis(); // Reset timeout on successful read
+            }
+            AsyncSerial::getInstance().poll();
+        }
+        return count;
+    }
+
+    size_t readBytesUntil(char terminator, uint8_t *buffer, size_t length) {
+        if (length < 1) return 0;
+        
+        size_t count = 0;
+        unsigned long startMillis = millis();
+        
+        while (count < length - 1) {
+            if (millis() - startMillis > _timeout) break;
+            
+            if (available()) {
+                uint8_t c = read();
+                if (c == terminator) break;
+                buffer[count++] = c;
+                startMillis = millis();
+            }
+            AsyncSerial::getInstance().poll();
+        }
+        buffer[count] = 0; // Null-terminate
+        return count;
+    }
+
+    String readString() {
+        String ret;
+        unsigned long startMillis = millis();
+        
+        while (true) {
+            if (millis() - startMillis > _timeout) break;
+            
+            if (available()) {
+                ret += (char)read();
+                startMillis = millis();
+            }
+            AsyncSerial::getInstance().poll();
+        }
+        return ret;
+    }
+
+    String readStringUntil(char terminator) {
+        String ret;
+        unsigned long startMillis = millis();
+        
+        while (true) {
+            if (millis() - startMillis > _timeout) break;
+            
+            if (available()) {
+                char c = read();
+                if (c == terminator) break;
+                ret += c;
+                startMillis = millis();
+            }
+            AsyncSerial::getInstance().poll();
+        }
+        return ret;
+    }
+
+    // Méthodes inutiles mais implémentées pour la compatibilité
+    bool find(char *target) { return false; }
+    bool find(uint8_t *target, size_t length) { return false; }
+    bool findUntil(char *target, char *terminator) { return false; }
+    bool findUntil(uint8_t *target, size_t targetLen, char *terminator, size_t termLen) { return false; }
+    float parseFloat() { return 0.0f; }
+    long parseInt() { return 0L; }
+    long parseInt(char skipChar) { return 0L; }
+
 private:
     RingBuffer<uint8_t, BUFFER_SIZE> _rxBuffer;
     RingBuffer<uint8_t, BUFFER_SIZE> _txBuffer;
     const uint32_t _interMessageDelay;
+    unsigned long _timeout = 1000; // Timeout par défaut de 1 seconde
 };
 
 // ============================== CooperativeLock ==============================
@@ -131,6 +238,20 @@ private:
 };
 
 // ============================== AsyncSerial ==============================
+/**
+ * @class AsyncSerial
+ * @brief Singleton class managing asynchronous access to the hardware serial port.
+ * 
+ * This class implements the Singleton pattern to ensure only one instance
+ * manages the hardware serial port. Access it via AsyncSerial::getInstance().
+ * 
+ * Thread-safety notes:
+ * - getInstance(): Thread-safe (C++11 static initialization)
+ * - flush(): Thread-safe (protected by CooperativeLock)
+ * - poll(): Thread-safe when used as intended
+ * - begin()/end(): Not thread-safe, should be called once at startup/shutdown
+ * - registerProxy(): Not thread-safe, should be called once per proxy at initialization
+ */
 class AsyncSerial {
 public:
     static AsyncSerial& getInstance() {
@@ -261,6 +382,15 @@ public:
 
         }
     }
+
+    void begin(unsigned long baud) {
+        Serial.begin(baud);
+    }
+
+    void end() {
+        Serial.end();
+    }
+
 private:
     AsyncSerial() = default;
 
