@@ -1,39 +1,48 @@
 # SimpleTimer
 
-A lightweight, persistent and versatile timer class for embedded systems and IoT applications. This timer implementation provides a clean and efficient way to handle timing operations with automatic state persistence.
+A lightweight and versatile timer class for ESP32. This implementation provides a clean and efficient way to handle timing operations with microsecond precision while offering a simple millisecond-based interface.
 
 ## Key Features
 
-### Unique State Persistence
-The most distinctive feature is its effortless persistence handling:
-- No global variables needed
-- No complex static declarations
-- No need to think about where to define your timers
-- Just create and use timers anywhere in your code - they'll maintain their state automatically
+### Flexible Usage
+- Use as local variable: timer resets each time the scope is entered
+- Use as static local: state persists between function calls
+- Use as global: state shared across the program
+- No special setup needed - just declare and use!
 
 ### Technical Features
-- Hardware agnostic implementation (works on any platform)
+- Uses ESP32's high-precision timer (esp_timer_get_time)
 - Independent timer instances
 - Pause/Resume capabilities
-- Overflow protection
-- Memory efficient implementation
-- *Millisecond precision (microsecond precision possible with minor modifications)*
+- 64-bit overflow protection
+- Memory efficient implementation (24 bytes per instance)
+- Microsecond precision internally, millisecond interface externally
 
 ## Example
 
 ```cpp
-void loop() {
-    Timer t1;          // Create timer on-the-fly (persistence is automatic)
-    
-    if(t1.done(1000)) {         // Check if 1000 ms elapsed
+// As regular local (resets each call)
+void function1() {
+    Timer t1;
+    if(t1.done(1000)) {
         Serial.println("Timer expired!");
     }
-    
-    Serial.println(t1.elapsed()); // Get elapsed time
-    
-    t1.pause();       // Pause the timer
-    delay(500);       // Do something while paused
-    t1.resume();      // Resume the timer
+}
+
+// As static local (persists between calls)
+void function2() {
+    static Timer t2;
+    if(t2.done(1000)) {
+        Serial.println("Triggers every second!");
+    }
+}
+
+// As global (shared state)
+Timer globalTimer;
+void function3() {
+    if(globalTimer.done(1000)) {
+        Serial.println("Shared timing!");
+    }
 }
 ```
 
@@ -42,13 +51,17 @@ void loop() {
 ### Core Methods
 - `elapsed()`: Returns elapsed time since start/reset in milliseconds
 - `done(duration)`: Returns true if specified duration has elapsed and automatically resets
-- `check(duration)`: Similar to done() but without auto-reset
+- `check(duration)`: Like done() but without auto-reset
 - `reset()`: Manually resets the timer
 - `pause()`: Temporarily stops the timer
 - `resume()`: Resumes a paused timer
 
 ### Technical Notes
-- Uses `unsigned long` for duration values
-- First `check()` or `done()` call initializes the timer
+- Uses `uint64_t` internally for microsecond precision
+- Returns `unsigned long` (milliseconds) for all time values
+- First instantiation initializes the timer
 - Paused timers maintain their elapsed time
-- Handles timer overflow correctly
+- Handles 64-bit timer overflow correctly
+
+## Implementation
+The timer uses ESP32's esp_timer_get_time() for microsecond precision while presenting a simple millisecond-based interface. Each instance requires only 24 bytes of memory (two 64-bit timestamps and a boolean flag).

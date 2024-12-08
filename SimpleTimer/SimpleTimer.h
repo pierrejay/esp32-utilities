@@ -2,82 +2,68 @@
 
 /**
  * @class Timer
- * @brief A simple, persistent and versatile timer class for embedded systems.
+ * @brief A simple, persistent, and versatile timer class for embedded systems.
  *
- * This class provides a lightweight timer implementation with automatic persistence
- * and additional features like pause/resume capabilities. Each timer instance is 
- * independent and maintains its state between function calls without explicit static
- * declaration.
+ * This class provides a lightweight timer implementation with straightforward usage
+ * and additional features like pause/resume capabilities. Each `Timer` instance maintains 
+ * its own state, allowing multiple independent timers if desired. By declaring the timer 
+ * as a static local variable, its state persists across function calls.
  *
  * ## Key Features
- * - **Independent Timers**: Each Timer instance operates independently
- * - **Automatic Persistence**: State persists between function calls
- * - **Simple API**: Single-word methods following KISS principle
- * - **Pause/Resume**: Ability to temporarily halt the timer
- * - **Overflow Protection**: Handles overflow correctly
+ * - **Simple API**: Methods are easy to use and follow the KISS principle.
+ * - **Pause/Resume**: Ability to temporarily halt the timer and resume later.
+ * - **Overflow Protection**: Automatically handles time wrap-around safely.
+ * - **Flexible Usage**: Instantiable as global, static local, or regular local variables, 
+ *   giving you control over when and how the timer state persists.
  *
  * ## Usage Example
  * ```cpp
  * void loop() {
- *     Timer t1;          // Create timer on-the-fly (persistence is automatic)
+ *     static Timer t1; // Timer persists between loop() calls
  *     
- *     if(t1.done(1000)) {         // Check if 1000 ms elapsed
+ *     if (t1.done(1000)) { // Check if 1000 ms have elapsed since last reset
  *         Serial.println("Timer expired!");
  *     }
  *     
- *     Serial.println(t1.elapsed()); // Get elapsed time
+ *     Serial.println(t1.elapsed()); // Print elapsed time in ms
  *     
- *     t1.pause();       // Pause the timer
- *     delay(500);       // Do something while paused
- *     t1.resume();      // Resume the timer
+ *     t1.pause();    // Pause the timer
+ *     delay(500);     // Do some work while paused
+ *     t1.resume();   // Resume counting
  * }
  * ```
  *
  * ## Methods
- * - **elapsed()**: Returns elapsed time since start/reset in milliseconds
- * - **done(duration)**: Returns true if specified duration has elapsed and resets
- * - **check(duration)**: Like done() but without auto-reset
- * - **reset()**: Manually resets the timer
- * - **pause()**: Temporarily stops the timer
- * - **resume()**: Resumes a paused timer
- *
- * ## Implementation Details
- * - Uses static variables for automatic persistence
- * - Handles overflow protection
- * - Paused state preserved between function calls
- * - Memory efficient - only uses static memory when needed
+ * - **elapsed()**: Returns elapsed time since start or last reset (in milliseconds).
+ * - **done(duration)**: Checks if the specified duration (in ms) has elapsed. 
+ *   If yes, returns true and resets the timer to start counting again.
+ * - **check(duration)**: Like `done()`, but does not reset the timer.
+ * - **reset()**: Manually resets the timer's reference start time.
+ * - **pause()**: Halts the timer, preserving the elapsed time so far.
+ * - **resume()**: Resumes the timer from the point it was paused.
  *
  * ## Notes
- * - Always use unsigned long for durations to match timer
- * - First check() or done() call initializes the timer
- * - Paused timers maintain their elapsed time
+ * - Use `unsigned long` for durations to match the timer's operations.
+ * - If the timer hasn't started yet, the first call to `check()` or `done()` 
+ *   initializes it.
+ * - While paused, the elapsed time is fixed until `resume()` is called.
+ * - Internally uses microseconds (`esp_timer_get_time()`), but `elapsed()` returns milliseconds.
+ *   This approach provides high resolution while offering millisecond granularity to the user.
+ * - If you need platform-agnostic behavior, consider adapting the timing source (e.g. using `millis()`).
  *
- * @author Pierre Jay
+ * @author Pierre
  * @date 2024
  */
-
+#include <Arduino.h>
 #include <climits>
 #include "esp_timer.h"
 
 class Timer {
 private:
-    struct State {
-        uint64_t start;    // Start timestamp
-        uint64_t paused;   // Timestamp when paused
-        bool isPaused;         // Pause state
-        bool isFirstRun;       // First run state
-        
-        State() : start(0), paused(0), isPaused(false), isFirstRun(true) {}
-    };
+    uint64_t start;    
+    uint64_t paused;   
+    bool isPaused;     
 
-    State& getState() {
-        static State state;
-        return state;
-    }
-
-    State* state;  // Pointer to persistent state
-
-    // Handles overflow
     uint64_t delta(uint64_t current, uint64_t previous) {
         return (current >= previous) ? 
                current - previous : 
@@ -85,21 +71,14 @@ private:
     }
 
 public:
-    Timer() : state(&getState()) {}
+    Timer() : start(esp_timer_get_time()), paused(0), isPaused(false) {}
 
     // Returns elapsed time in milliseconds
     unsigned long elapsed() {
-        if (state->isFirstRun) {
-            state->start = esp_timer_get_time();
-            state->isFirstRun = false;
-            return 0;
+        if (isPaused) {
+            return delta(paused, start) / 1000;  // µs to ms
         }
-
-        if (state->isPaused) {
-            return delta(state->paused, state->start) / 1000; // Convert µs to ms
-        }
-
-        return delta(esp_timer_get_time(), state->start) / 1000; // Convert µs to ms
+        return delta(esp_timer_get_time(), start) / 1000;
     }
 
     // Tests if duration elapsed and auto-resets if true
@@ -118,26 +97,25 @@ public:
 
     // Resets the timer
     void reset() {
-        state->start = esp_timer_get_time();
-        state->isFirstRun = false;
-        if (state->isPaused) {
-            state->paused = state->start;
+        start = esp_timer_get_time();
+        if (isPaused) {
+            paused = start;
         }
     }
 
     // Pauses the timer
     void pause() {
-        if (!state->isPaused && !state->isFirstRun) {
-            state->paused = esp_timer_get_time();
-            state->isPaused = true;
+        if (!isPaused) {
+            paused = esp_timer_get_time();
+            isPaused = true;
         }
     }
 
     // Resumes the timer
     void resume() {
-        if (state->isPaused) {
-            state->start += delta(esp_timer_get_time(), state->paused);
-            state->isPaused = false;
+        if (isPaused) {
+            start += delta(esp_timer_get_time(), paused);
+            isPaused = false;
         }
     }
 };
