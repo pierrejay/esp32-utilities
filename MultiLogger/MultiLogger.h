@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
@@ -8,8 +9,13 @@
 #include <vector>
 #include <memory>
 #include "FS.h"
+#include <inttypes.h>
 
-#define LOG_ALERT(...)   MultiLogger::getInstance().log(logger::LogLevel::ALERT, __FILE__, __LINE__, __VA_ARGS__)
+//##############################################################################
+//                            MACROS for logging
+//##############################################################################
+
+#define LOG_ERROR(...)   MultiLogger::getInstance().log(logger::LogLevel::ERROR, __FILE__, __LINE__, __VA_ARGS__)
 #define LOG_WARNING(...) MultiLogger::getInstance().log(logger::LogLevel::WARNING, __FILE__, __LINE__, __VA_ARGS__)
 #define LOG_INFO(...)    MultiLogger::getInstance().log(logger::LogLevel::INFO, __FILE__, __LINE__, __VA_ARGS__)
 #define LOG_SYSTEM(...) MultiLogger::getInstance().log(logger::LogLevel::SYSTEM, __FILE__, __LINE__, __VA_ARGS__)
@@ -18,18 +24,38 @@
 
 namespace logger {
 
+    static constexpr size_t MAX_UINT64_CHARS = 20;  // Taille max d'un uint64_t en caractères
+    static constexpr size_t MIN_TIMESTAMP_BUFFER = MAX_UINT64_CHARS + 1;  // +1 pour le \0
+
+//##############################################################################
+//                                Structures
+//##############################################################################
+
 /**
  * @brief Log levels in order of decreasing severity
  * Each level includes all levels above it in severity when used as a filter
  */
 enum class LogLevel {
     NONE,       // Pas de log (désactive la sortie)
-    ALERT,      // Rouge - Uniquement les alertes
-    WARNING,    // Jaune - ALERT + WARNING
-    INFO,       // Vert  - ALERT + WARNING + INFO
+    ERROR,      // Rouge - Uniquement les erreurs
+    WARNING,    // Jaune - ERROR + WARNING
+    INFO,       // Vert  - ERROR + WARNING + INFO
     SYSTEM,     // Bleu  - Tous sauf DEBUG
     DEBUG       // Rose  - Tous les logs
 };
+
+// Fonction helper pour convertir LogLevel en string
+inline const char* toString(LogLevel level) {
+    switch (level) {
+        case LogLevel::NONE:    return "NONE";
+        case LogLevel::ERROR:   return "ERROR";
+        case LogLevel::WARNING: return "WARNING";
+        case LogLevel::INFO:    return "INFO";
+        case LogLevel::SYSTEM:  return "SYSTEM";
+        case LogLevel::DEBUG:   return "DEBUG";
+        default:                return "UNKNOWN";
+    }
+}
 
 enum class OutputFormat {
     ASCII,
@@ -51,8 +77,13 @@ struct LogMessage {
     uint32_t timestamp;     // Timestamp Unix en secondes
     uint64_t uptime;        // Temps depuis le démarrage en millisecondes
     char taskName[16];
+    const char* deviceId;   // Identifiant du dispositif (peut être nullptr)
 };
 
+
+//##############################################################################
+//                             Time Provider
+//##############################################################################
 
 /**
  * @brief Time provider interface for timestamp generation
@@ -96,18 +127,21 @@ public:
     }
 };
 
+//##############################################################################
+//                        Log Output (abstract class)
+//##############################################################################
+
 /**
  * @brief Interface for log output
  * 
- * Implementations should handle their specific output type
- * and provide methods to begin, print, and println.
+ * Simplified interface following SOLID principles, focusing on the core
+ * responsibility of writing log messages.
  */
 class ILogOutput {
 public:
     virtual ~ILogOutput() = default;
-    virtual void begin() = 0;
-    virtual void print(const char* message) = 0;
-    virtual void println(const char* message) = 0;
+    virtual void begin() = 0;  // Initialisation spécifique si nécessaire
+    virtual void writeLogMessage(const LogMessage& msg) = 0;
     virtual OutputType getType() const = 0;
 
     inline void setLogLevel(LogLevel level) {
@@ -119,8 +153,13 @@ public:
     }
 
 protected:
-    LogLevel level_ = LogLevel::DEBUG;  // Par défaut, tout logger
+    LogLevel level_ = LogLevel::DEBUG;
 };
+
+
+//##############################################################################
+//                          Serial Logger (console output)
+//##############################################################################
 
 /**
  * @brief Serial output
@@ -130,45 +169,61 @@ protected:
 class SerialLogger : public ILogOutput {
 public:
     explicit SerialLogger(HardwareSerial& serial, uint32_t baud = 115200) 
-        : serial_(serial), baud_(baud) {}
+        : serial_(serial), baud_(baud), lastCheckTime_(0), isConnected_(false) {}
 
     void begin() override {
-        serial_.begin(baud_);
+        return;
     }
 
-    void print(const char* message) override {
-        serial_.print(message);
-    }
+    void writeLogMessage(const LogMessage& msg) override {
+        if (!checkConnection()) return;
 
-    void println(const char* message) override {
-        serial_.println(message);
-    }
+        char timestamp[32];
+        if (msg.timestamp > 0) {
+            // Validation du timestamp
+            if (msg.timestamp > 0x7FFFFFFF) {  // Max valid Unix timestamp
+                goto use_uptime;
+            }
 
-    void setColor(LogLevel level) {
-        switch (level) {
-            case LogLevel::ALERT:
-                serial_.print("\033[31m"); // Rouge
-                break;
-            case LogLevel::WARNING:
-                serial_.print("\033[33m"); // Jaune
-                break;
-            case LogLevel::INFO:
-                serial_.print("\033[32m"); // Vert
-                break;
-            case LogLevel::SYSTEM:
-                serial_.print("\033[34m"); // Bleu
-                break;
-            case LogLevel::DEBUG:
-                serial_.print("\033[35m"); // Rose
-                break;
-            default:
-                serial_.print("\033[37m"); // Blanc
-                break;
+            time_t t = msg.timestamp;
+            struct tm* timeinfo = gmtime(&t);
+            if (!timeinfo) {
+                goto use_uptime;
+            }
+
+            int written = snprintf(timestamp, sizeof(timestamp), 
+                    "%04d-%02d-%02d %02d:%02d:%02d.%03lu",
+                    timeinfo->tm_year + 1900,
+                    timeinfo->tm_mon + 1,
+                    timeinfo->tm_mday,
+                    timeinfo->tm_hour,
+                    timeinfo->tm_min,
+                    timeinfo->tm_sec,
+                    static_cast<unsigned long>(msg.uptime % 1000));
+
+            if (written <= 0 || written >= sizeof(timestamp)) {
+                goto use_uptime;
+            }
+        } else {
+        use_uptime:
+            snprintf(timestamp, sizeof(timestamp), "%" PRIu64, msg.uptime);
         }
-    }
 
-    void resetColor() {
-        serial_.print("\033[37m"); // Retour au blanc
+        setColor(msg.level);
+        serial_.print(timestamp);
+        serial_.print(" [");
+        serial_.print(logger::toString(msg.level));
+        serial_.print("] ");
+        
+        resetColor();
+        serial_.print(msg.message);
+        serial_.print(" (");
+        serial_.print(msg.taskName);
+        serial_.print("@");
+        serial_.print(msg.file);
+        serial_.print(":");
+        serial_.print(msg.line);
+        serial_.println(")");
     }
 
     OutputType getType() const override { return OutputType::CONSOLE; }
@@ -176,7 +231,73 @@ public:
 private:
     HardwareSerial& serial_;
     uint32_t baud_;
+    unsigned long lastCheckTime_;
+    bool isConnected_;
+    static constexpr unsigned long CHECK_INTERVAL = 1000;
+
+    void setColor(LogLevel level) {
+        if (!checkConnection()) return;
+        switch (level) {
+            case LogLevel::ERROR:   serial_.print("\033[31m"); break;
+            case LogLevel::WARNING: serial_.print("\033[33m"); break;
+            case LogLevel::INFO:    serial_.print("\033[32m"); break;
+            case LogLevel::SYSTEM:  serial_.print("\033[34m"); break;
+            case LogLevel::DEBUG:   serial_.print("\033[35m"); break;
+            default:               serial_.print("\033[37m"); break;
+        }
+    }
+
+    void resetColor() {
+        if (!checkConnection()) return;
+        serial_.print("\033[37m");
+    }
+
+    bool checkConnection() {
+        unsigned long currentTime = millis();
+        if (currentTime - lastCheckTime_ >= CHECK_INTERVAL) {
+            #ifdef ESP32
+                isConnected_ = Serial.availableForWrite() > 0;
+            #else
+                isConnected_ = serial_.availableForWrite() > 0;
+            #endif
+            lastCheckTime_ = currentTime;
+        }
+        return isConnected_;
+    }
+
+    void formatTimestamp(uint32_t timestamp, uint64_t ms, char* buffer, size_t bufferSize) {
+        if (timestamp > 0) {
+            time_t t = timestamp;
+            struct tm* timeinfo = gmtime(&t);
+            snprintf(buffer, bufferSize, 
+                    "%04d-%02d-%02d %02d:%02d:%02d.%03lu",
+                    timeinfo->tm_year + 1900,
+                    timeinfo->tm_mon + 1,
+                    timeinfo->tm_mday,
+                    timeinfo->tm_hour,
+                    timeinfo->tm_min,
+                    timeinfo->tm_sec,
+                    static_cast<unsigned long>(ms % 1000));
+        } else {
+            uint64_t totalMs = ms;
+            uint32_t hours = totalMs / 3600000;
+            uint32_t minutes = (totalMs % 3600000) / 60000;
+            uint32_t seconds = (totalMs % 60000) / 1000;
+            uint32_t millis = totalMs % 1000;
+            
+            snprintf(buffer, bufferSize, "%02lu:%02lu:%02lu.%03lu", 
+                    static_cast<unsigned long>(hours), 
+                    static_cast<unsigned long>(minutes), 
+                    static_cast<unsigned long>(seconds), 
+                    static_cast<unsigned long>(millis));
+        }
+    }
 };
+
+
+//##############################################################################
+//                         SD Logger (filesystem output)
+//##############################################################################
 
 /**
  * @brief SD output
@@ -185,51 +306,59 @@ private:
  */
 class SDLogger : public ILogOutput {
 public:
-    struct Config {
-        bool splitByLevel = false;  // Si true, crée un fichier par niveau
-        const char* extension = nullptr;  // Extension à utiliser (par défaut prend celle du path)
-    };
-
     // Structure pour les infos de fichier
     struct FileInfo {
         size_t size;
         const char* path;
     };
 
-    SDLogger(fs::FS& fs, const char* path, const Config& config = Config()) 
-        : fs_(fs), basePath_(path), config_(config), writeCount_(0) {
-        // Extraire l'extension si non spécifiée
-        if (!config_.extension) {
-            const char* dot = strrchr(path, '.');
-            if (dot) {
-                config_.extension = dot;  // Utilise l'extension du fichier
-            } else {
-                config_.extension = "";   // Pas d'extension
-            }
-        }
-    }
+    SDLogger(fs::FS& fs, const char* path, bool splitByLevel = false) 
+        : fs_(fs), basePath_(path), splitByLevel_(splitByLevel), writeCount_(0) {}
 
     void begin() override {
-        if (!config_.splitByLevel) {
+        if (!splitByLevel_) {
             // Mode normal : un seul fichier
             file_ = fs_.open(basePath_, "a");
             return;
         }
-
         // Mode fichiers séparés : on n'ouvre rien pour l'instant
         // Les fichiers seront ouverts à la demande
     }
 
-    void println(const char* message) override {
-        if (!config_.splitByLevel) {
-            writeLine(file_, message);
-            return;
+    void writeLogMessage(const LogMessage& msg) override {
+        char buffer[512];
+        int written;
+        if (msg.deviceId) {
+            written = snprintf(buffer, sizeof(buffer),
+                "%lu,%" PRIu64 ",%s,%s@%s:%d,%s,%s",
+                static_cast<unsigned long>(msg.timestamp),
+                msg.uptime,
+                logger::toString(msg.level),
+                msg.taskName,
+                msg.file,
+                msg.line,
+                msg.message,
+                msg.deviceId);
+        } else {
+            written = snprintf(buffer, sizeof(buffer),
+                "%lu,%" PRIu64 ",%s,%s@%s:%d,%s",
+                static_cast<unsigned long>(msg.timestamp),
+                msg.uptime,
+                logger::toString(msg.level),
+                msg.taskName,
+                msg.file,
+                msg.line,
+                msg.message);
         }
 
-        // Déterminer le niveau à partir du message CSV
-        LogLevel level = detectLevel(message);
-        fs::File& file = getFileForLevel(level);
-        writeLine(file, message);
+        if (written > 0 && written < sizeof(buffer)) {
+            if (!splitByLevel_) {
+                writeToFile(file_, buffer);
+            } else {
+                fs::File& file = getFileForLevel(msg.level);
+                writeToFile(file, buffer);
+            }
+        }
     }
 
     OutputType getType() const override { return OutputType::SD; }
@@ -238,7 +367,7 @@ public:
     std::vector<FileInfo> getFilesInfo() const {
         std::vector<FileInfo> infos;
         
-        if (!config_.splitByLevel) {
+        if (!splitByLevel_) {
             if (file_) {
                 infos.push_back({file_.size(), file_.path()});
             }
@@ -256,7 +385,7 @@ public:
 
     // Créer un nouveau fichier en archivant l'existant
     bool rotate() {
-        if (!config_.splitByLevel) {
+        if (!splitByLevel_) {
             return rotateFile(file_, basePath_);
         }
 
@@ -276,22 +405,11 @@ public:
 private:
     fs::FS& fs_;
     const char* basePath_;
-    Config config_;
+    bool splitByLevel_;
     fs::File file_;  // Fichier unique en mode normal
     std::array<fs::File, 4> levelFiles_;  // Un fichier par niveau en mode séparé
     size_t writeCount_;
     static constexpr size_t FLUSH_INTERVAL = 10;
-
-    LogLevel detectLevel(const char* message) {
-        // Le message est au format CSV, le niveau est le 2e champ
-        const char* comma = strchr(message, ',');
-        if (!comma) return LogLevel::DEBUG;
-        comma++;
-        if (strncmp(comma, "ALERT", 5) == 0) return LogLevel::ALERT;
-        if (strncmp(comma, "WARNING", 7) == 0) return LogLevel::WARNING;
-        if (strncmp(comma, "SYSTEM", 6) == 0) return LogLevel::SYSTEM;
-        return LogLevel::DEBUG;
-    }
 
     fs::File& getFileForLevel(LogLevel level) {
         size_t idx = static_cast<size_t>(level);
@@ -299,7 +417,6 @@ private:
             // Construire le nom du fichier
             char path[256];
             const char* base = basePath_;
-            const char* ext = config_.extension;
             
             // Trouver où insérer le suffixe (avant l'extension)
             const char* dot = strrchr(base, '.');
@@ -307,10 +424,10 @@ private:
                 size_t baseLen = dot - base;
                 snprintf(path, sizeof(path), "%.*s_%s%s", 
                         static_cast<int>(baseLen), base,
-                        getLevelSuffix(level), ext);
+                        getLevelSuffix(level), dot);
             } else {
-                snprintf(path, sizeof(path), "%s_%s%s", 
-                        base, getLevelSuffix(level), ext);
+                snprintf(path, sizeof(path), "%s_%s", 
+                        base, getLevelSuffix(level));
             }
             
             levelFiles_[idx] = fs_.open(path, "a");
@@ -319,16 +436,20 @@ private:
     }
 
     const char* getLevelSuffix(LogLevel level) {
-        switch (level) {
-            case LogLevel::ALERT: return "alert";
-            case LogLevel::WARNING: return "warning";
-            case LogLevel::DEBUG: return "debug";
-            case LogLevel::SYSTEM: return "system";
-            default: return "unknown";
+        static char buffer[32];
+        const char* str = logger::toString(level);
+        
+        size_t i = 0;
+        while (str[i] && i < sizeof(buffer) - 1) {
+            buffer[i] = tolower(str[i]);
+            i++;
         }
+        buffer[i] = '\0';
+        
+        return buffer;
     }
 
-    void writeLine(fs::File& file, const char* message) {
+    void writeToFile(fs::File& file, const char* message) {
         if (!file) return;
         
         if (!file.println(message)) {
@@ -382,6 +503,11 @@ private:
     }
 };
 
+
+//##############################################################################
+//                       JSON Logger (JSON stream output)
+//##############################################################################
+
 /**
  * @brief JSON output
  * 
@@ -389,118 +515,50 @@ private:
  */
 class JsonLogger : public ILogOutput {
 public:
-    explicit JsonLogger(Print& output) 
-        : output_(output) {}
+    using JsonCallback = std::function<void(JsonObject&)>;
+
+    explicit JsonLogger(JsonCallback callback) 
+        : callback_(callback) {}
 
     void begin() override {}
-    void print(const char* message) override {}
-    void println(const char* message) override {}
 
-    void sendLogEvent(const LogMessage& msg) {
-        char location[256];
-        
-        // Début du JSON directement avec les données
-        output_.print("{");
-        
-        // Timestamp Unix
-        output_.print("\"timestamp\":");
-        output_.print(msg.timestamp);
-        output_.print(",");
-        
-        // Uptime en millisecondes
-        output_.print("\"uptime\":");
-        output_.print(msg.uptime);
-        output_.print(",");
-        
-        // Level
-        output_.print("\"level\":\"");
-        output_.print(getLevelString(msg.level));
-        output_.print("\",");
-        
-        // Message (avec échappement)
-        output_.print("\"message\":\"");
-        printEscaped(msg.message);
-        output_.print("\",");
-        
-        // Location (file:line)
-        snprintf(location, sizeof(location), "%s:%d", msg.file, msg.line);
-        output_.print("\"location\":\"");
-        printEscaped(location);
-        output_.print("\",");
-        
-        // Task
-        output_.print("\"task\":\"");
-        printEscaped(msg.taskName);
-        output_.print("\"");
-        
-        // Fin du JSON
-        output_.println("}");
+    void writeLogMessage(const LogMessage& msg) override {
+        StaticJsonDocument<512> doc;  // Taille suffisante pour un message de log
+        JsonObject obj = doc.to<JsonObject>();
+
+        // Ajout des champs obligatoires
+        obj["timestamp"] = msg.timestamp;
+        obj["uptime"] = msg.uptime;
+        obj["level"] = logger::toString(msg.level);
+        obj["message"] = msg.message;
+        obj["location"] = String(msg.file) + ":" + String(msg.line);
+        obj["task"] = msg.taskName;
+
+        // Ajout conditionnel du deviceId
+        if (msg.deviceId) {
+            obj["deviceid"] = msg.deviceId;
+        }
+
+        // Appel du callback
+        callback_(obj);
     }
 
     OutputType getType() const override { return OutputType::JSON; }
 
 private:
-    Print& output_;
-
-    // Fonction utilitaire pour échapper les caractères spéciaux JSON
-    inline void printEscaped(const char* str) {
-        if (!str) {
-            output_.print("null");  // Gestion des pointeurs null
-            return;
-        }
-
-        while (*str) {
-            unsigned char c = *str++;  // unsigned pour gérer correctement les caractères étendus
-            
-            // Caractères de contrôle JSON standard
-            switch (c) {
-                case '\"': output_.print("\\\""); break;  // Guillemets
-                case '\\': output_.print("\\\\"); break;  // Backslash
-                case '\b': output_.print("\\b"); break;   // Backspace
-                case '\f': output_.print("\\f"); break;   // Form feed
-                case '\n': output_.print("\\n"); break;   // Nouvelle ligne
-                case '\r': output_.print("\\r"); break;   // Retour chariot
-                case '\t': output_.print("\\t"); break;   // Tab
-                case '/': output_.print("\\/"); break;    // Slash (optionnel mais recommandé)
-                
-                default:
-                    // Caractères de contrôle et caractères Unicode étendus
-                    if (c < 0x20 || c == 0x7F) {
-                        // Caractères de contrôle en notation \uXXXX
-                        char hex[7];
-                        snprintf(hex, sizeof(hex), "\\u%04x", c);
-                        output_.print(hex);
-                    }
-                    // Caractères Unicode étendus (>127)
-                    else if (c > 0x7E) {
-                        char hex[7];
-                        snprintf(hex, sizeof(hex), "\\u%04x", c);
-                        output_.print(hex);
-                    }
-                    // Caractères ASCII imprimables normaux
-                    else {
-                        output_.print((char)c);
-                    }
-            }
-        }
-    }
-
-    inline const char* getLevelString(LogLevel level) {
-        switch (level) {
-            case LogLevel::ALERT:   return "ALERT";
-            case LogLevel::WARNING: return "WARNING";
-            case LogLevel::DEBUG:   return "DEBUG";
-            case LogLevel::SYSTEM:  return "SYSTEM";
-            default:                return "UNKNOWN";
-        }
-    }
+    JsonCallback callback_;
 };
+
+
+//##############################################################################
+//                            System stats helpers
+//##############################################################################
 
 inline String getSystemStats() {
     char buffer[256];
     #ifdef ESP32
         snprintf(buffer, sizeof(buffer),
-                "Heap: %zu bytes (%zu min) Stack: %lu CPU: %.1f°C",
+                "Heap: %zu bytes (%zu min) | Stack: %lu | CPU: %.1f°C",
                 ESP.getFreeHeap(),
                 ESP.getMinFreeHeap(),
                 uxTaskGetStackHighWaterMark(nullptr),
@@ -518,6 +576,11 @@ inline void logSystemStats() {
 
 } // namespace logger
 
+
+//##############################################################################
+//                            MultiLogger class
+//##############################################################################
+
 /**
  * @brief Thread-safe logging system with multiple outputs and filtering capabilities
  * 
@@ -534,22 +597,29 @@ public:
     using LogMessage = logger::LogMessage;
     using OutputType = logger::OutputType;
     using TimeProvider = logger::TimeProvider;
-    using DefaultTime = logger::DefaultTime;  // Ajout de l'alias manquant
+    using DefaultTime = logger::DefaultTime;
 
-    struct Config {
-        TickType_t queueTimeout = pdMS_TO_TICKS(100);    // Timeout for queue operations
-        UBaseType_t taskPriority = 1;                     // Priority of the logger task
-        size_t queueSize = 8;                            // Size of the message queue
-        LogLevel filter = LogLevel::ALL;                // Global log filter level
-    };
-
-    inline void setConfig(const Config& config) {
-        config_ = config;
+    // Constructeur avec paramètres optionnels
+    static MultiLogger& getInstance(const char* deviceId = nullptr, LogLevel filter = LogLevel::DEBUG) {
+        static MultiLogger instance(deviceId, filter);
+        return instance;
     }
 
-    static MultiLogger& getInstance() {
-        static MultiLogger instance;
-        return instance;
+    // Getters/Setters pour les paramètres configurables
+    void setDeviceId(const char* deviceId) {
+        deviceId_ = deviceId;
+    }
+
+    const char* getDeviceId() const {
+        return deviceId_;
+    }
+
+    void setLogFilter(LogLevel filter) {
+        filter_ = filter;
+    }
+
+    LogLevel getLogFilter() const {
+        return filter_;
     }
 
     void addOutput(logger::ILogOutput& output) {
@@ -564,7 +634,7 @@ public:
     bool begin() {
         if (logQueue_ != nullptr) return true;
 
-        logQueue_ = xQueueCreate(config_.queueSize, sizeof(LogMessage));
+        logQueue_ = xQueueCreate(QUEUE_SIZE, sizeof(LogMessage));
         if (logQueue_ == nullptr) return false;
 
         BaseType_t result = xTaskCreate(
@@ -572,7 +642,7 @@ public:
             "Logger",
             4096,
             this,
-            config_.taskPriority,
+            TASK_PRIORITY,
             &loggerTaskHandle_
         );
 
@@ -612,10 +682,11 @@ public:
             .level = level,
             .line = line,
             .timestamp = timeProvider_.current->getTimestamp(),
-            .uptime = timeProvider_.current->getMillis()
+            .uptime = timeProvider_.current->getMillis(),
+            .deviceId = deviceId_
         };
 
-        // Copie sécurisée des chaînes
+        // Copie sécurisée des chaînes avec le nom de fichier déjà extrait
         strncpy(msg.file, getFileName(file), MAX_FILENAME - 1);
         msg.file[MAX_FILENAME - 1] = '\0';
 
@@ -632,19 +703,15 @@ public:
             strcpy(msg.taskName, "unknown");
         }
 
-        return xQueueSend(logQueue_, &msg, config_.queueTimeout) == pdTRUE;
+        return xQueueSend(logQueue_, &msg, QUEUE_TIMEOUT) == pdTRUE;
     }
 
     inline void setTimeProvider(TimeProvider& provider) {
         timeProvider_.current = &provider;
     }
 
-    inline void setLogFilter(LogLevel filter) {
-        config_.filter = filter;
-    }
-
     inline bool isLevelEnabled(LogLevel level) const {
-        return isLevelEnabled(level, config_.filter);
+        return isLevelEnabled(level, filter_);
     }
 
     bool isLevelEnabled(LogLevel messageLevel, LogLevel filterLevel) const {
@@ -679,11 +746,17 @@ public:
     }
 
 private:
+    // Configuration hardcodée
     static constexpr size_t MAX_FILENAME = 64;
-    static constexpr size_t MAX_MESSAGE = 128;
+    static constexpr size_t MAX_MESSAGE = 256;
     static constexpr size_t MAX_TASKNAME = 16;
     static constexpr size_t FORMAT_BUFFER = 512;
     static constexpr size_t TIMESTAMP_BUFFER_SIZE = 32;
+    
+    // Paramètres FreeRTOS hardcodés
+    static constexpr size_t QUEUE_SIZE = 8;
+    static constexpr TickType_t QUEUE_TIMEOUT = pdMS_TO_TICKS(100);
+    static constexpr UBaseType_t TASK_PRIORITY = 1;
 
     char formatBuffer_[FORMAT_BUFFER];
     char timestampBuffer_[TIMESTAMP_BUFFER_SIZE];
@@ -691,7 +764,6 @@ private:
     QueueHandle_t logQueue_;
     TaskHandle_t loggerTaskHandle_;
     std::vector<logger::ILogOutput*> outputs_;
-    Config config_; 
 
     /**
      * @brief Static time provider
@@ -705,10 +777,15 @@ private:
 
     StaticTimeProvider timeProvider_;
 
-    MultiLogger() 
+    const char* deviceId_;
+    LogLevel filter_;
+
+    MultiLogger(const char* deviceId = nullptr, LogLevel filter = LogLevel::DEBUG) 
         : logQueue_(nullptr)
         , loggerTaskHandle_(nullptr)
-        , timeProvider_()  // Initialise avec DefaultTime
+        , deviceId_(deviceId)
+        , filter_(filter)
+        , timeProvider_()
     {
     }
 
@@ -754,147 +831,13 @@ private:
      * @param msg The log message to process
      */
     void processLogMessage(const LogMessage& msg) {
-        formatTimestamp(msg.timestamp, msg.uptime, timestampBuffer_, sizeof(timestampBuffer_));
-        
         for (auto* output : outputs_) {
-            // Vérification du filtre par sortie
-            if (!isLevelEnabled(msg.level, output->getLogLevel())) {
-                continue;
-            }
-
-            switch (output->getType()) {
-                case logger::OutputType::JSON:
-                    static_cast<logger::JsonLogger*>(output)->sendLogEvent(msg);
-                    break;
-                    
-                case logger::OutputType::CONSOLE:
-                    formatAndSendSerial(
-                        static_cast<logger::SerialLogger*>(output),
-                        msg,
-                        timestampBuffer_
-                    );
-                    break;
-                    
-                default:
-                    formatStandardOutput(output, msg, timestampBuffer_);
-                    break;
+            if (isLevelEnabled(msg.level, output->getLogLevel())) {
+                output->writeLogMessage(msg);
             }
         }
     }
 
-    /**
-     * @brief Format and send a log message to a serial output
-     * 
-     * @param output The serial output to send the log message to
-     * @param msg The log message to format and send
-     * @param timestamp The timestamp to use in the log message
-     */
-    void formatAndSendSerial(logger::SerialLogger* output, 
-                           const LogMessage& msg,
-                           const char* timestamp) {
-        output->setColor(msg.level);
-        output->print(timestamp);
-        output->print(" [");
-        output->print(getLevelString(msg.level));
-        output->print("] ");
-        
-        output->resetColor();
-        output->print(msg.message);
-        output->print(" (");
-        output->print(getFileName(msg.file));
-        output->print(":");
-        output->print(std::to_string(msg.line).c_str());
-        output->println(")");
-    }
-
-    /**
-     * @brief Format a timestamp
-     * 
-     * @param timestamp The timestamp to format
-     * @param ms The milliseconds to format
-     * @param buffer The buffer to store the formatted timestamp
-     * @param bufferSize The size of the buffer
-     */
-    void formatTimestamp(uint32_t timestamp, uint64_t ms, char* buffer, size_t bufferSize) {
-        if (timeProvider_.current->getTimestamp() > 0) {
-            time_t t = timestamp;
-            struct tm* timeinfo = gmtime(&t);
-            int written = snprintf(buffer, bufferSize, 
-                    "%04d-%02d-%02d %02d:%02d:%02d.%03lu",
-                    timeinfo->tm_year + 1900,
-                    timeinfo->tm_mon + 1,
-                    timeinfo->tm_mday,
-                    timeinfo->tm_hour,
-                    timeinfo->tm_min,
-                    timeinfo->tm_sec,
-                    static_cast<unsigned long>(ms % 1000));
-            
-            if (written < 0 || written >= bufferSize) {
-                strncpy(buffer, "timestamp error", bufferSize - 1);
-                buffer[bufferSize - 1] = '\0';
-            }
-        } else {
-            // Utiliser directement l'uptime en millisecondes
-            uint64_t totalMs = ms;
-            uint32_t hours = totalMs / 3600000;
-            uint32_t minutes = (totalMs % 3600000) / 60000;
-            uint32_t seconds = (totalMs % 60000) / 1000;
-            uint32_t millis = totalMs % 1000;
-            
-            snprintf(buffer, bufferSize, "%02lu:%02lu:%02lu.%03lu", 
-                    static_cast<unsigned long>(hours), 
-                    static_cast<unsigned long>(minutes), 
-                    static_cast<unsigned long>(seconds), 
-                    static_cast<unsigned long>(millis));
-        }
-    }
-    
-    inline const char* getLevelString(LogLevel level) {
-        switch (level) {
-            case LogLevel::NONE:    return "NONE";
-            case LogLevel::ALERT:   return "ALERT";
-            case LogLevel::WARNING: return "WARNING";
-            case LogLevel::INFO:    return "INFO";
-            case LogLevel::SYSTEM:  return "SYSTEM";
-            case LogLevel::DEBUG:   return "DEBUG";
-            default:               return "UNKNOWN";
-        }
-    }
-    
-    /**
-     * @brief Format a log message for console output
-     * 
-     * @param output The output to format the log message for
-     * @param msg The log message to format
-     * @param timestamp The timestamp to use in the log message
-     */
-    void formatStandardOutput(logger::ILogOutput* output, 
-                            const LogMessage& msg,
-                            const char* timestamp) {
-        if (output->getType() == OutputType::SD) {
-            // Format CSV inchangé pour SD
-            snprintf(formatBuffer_, sizeof(formatBuffer_),
-                    "%s,%s,%s,%s,%s:%d",
-                    timestamp,
-                    getLevelString(msg.level),
-                    msg.taskName,
-                    msg.message,
-                    getFileName(msg.file),
-                    msg.line);
-        } else {
-            // Nouveau format ASCII plus compact
-            snprintf(formatBuffer_, sizeof(formatBuffer_), 
-                    "%s [%s] %s (%s@%s:%d)",
-                    timestamp,
-                    getLevelString(msg.level),
-                    msg.message,
-                    msg.taskName,
-                    getFileName(msg.file),
-                    msg.line);
-        }
-        output->println(formatBuffer_);
-    }
-    
     MultiLogger(const MultiLogger&) = delete;
     MultiLogger& operator=(const MultiLogger&) = delete;
 };
