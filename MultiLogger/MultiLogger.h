@@ -11,23 +11,24 @@
 
 #define LOG_ALERT(...)   MultiLogger::getInstance().log(logger::LogLevel::ALERT, __FILE__, __LINE__, __VA_ARGS__)
 #define LOG_WARNING(...) MultiLogger::getInstance().log(logger::LogLevel::WARNING, __FILE__, __LINE__, __VA_ARGS__)
-#define LOG_DEBUG(...) MultiLogger::getInstance().log(logger::LogLevel::DEBUG, __FILE__, __LINE__, __VA_ARGS__)
-#define LOG_SYSTEM(...)  MultiLogger::getInstance().log(logger::LogLevel::SYSTEM, __FILE__, __LINE__, __VA_ARGS__)
+#define LOG_INFO(...)    MultiLogger::getInstance().log(logger::LogLevel::INFO, __FILE__, __LINE__, __VA_ARGS__)
+#define LOG_SYSTEM(...) MultiLogger::getInstance().log(logger::LogLevel::SYSTEM, __FILE__, __LINE__, __VA_ARGS__)
+#define LOG_DEBUG(...)   MultiLogger::getInstance().log(logger::LogLevel::DEBUG, __FILE__, __LINE__, __VA_ARGS__)
 
 
 namespace logger {
 
+/**
+ * @brief Log levels in order of decreasing severity
+ * Each level includes all levels above it in severity when used as a filter
+ */
 enum class LogLevel {
-    ALERT,      // Rouge
-    WARNING,    // Jaune
-    DEBUG,    // Vert
-    SYSTEM      // Bleu
-};
-
-enum class LogFilter {
-    NONE,       // Aucun log
-    ALERTS,     // Alertes + warnings
-    ALL         // Tous les logs
+    NONE,       // Pas de log (désactive la sortie)
+    ALERT,      // Rouge - Uniquement les alertes
+    WARNING,    // Jaune - ALERT + WARNING
+    INFO,       // Vert  - ALERT + WARNING + INFO
+    SYSTEM,     // Bleu  - Tous sauf DEBUG
+    DEBUG       // Rose  - Tous les logs
 };
 
 enum class OutputFormat {
@@ -41,35 +42,6 @@ enum class OutputType {
     JSON
 };
 
-// Interface pour le RTC
-class TimeProvider {
-public:
-    virtual ~TimeProvider() = default;
-    virtual uint32_t getTimestamp() = 0;  // Retourne le timestamp Unix en secondes
-    virtual uint64_t getMillis() = 0;     // Retourne les millisecondes (64 bits)
-};
-
-// Implémentation par défaut utilisant millis()
-class DefaultTime : public TimeProvider {
-private:
-    uint32_t lastMillis_ = 0;    // Dernière valeur de millis() vue
-    uint64_t overflows_ = 0;     // Nombre d'overflows détectés
-    
-public:
-    uint32_t getTimestamp() override { return 0; }
-
-    uint64_t getMillis() override {
-        uint32_t currentMillis = millis();
-        
-        // Dtection de l'overflow
-        if (currentMillis < lastMillis_) {
-            overflows_++;  // On a fait un tour complet
-        }
-        lastMillis_ = currentMillis;
-        
-        return (overflows_ << 32) + currentMillis;
-    }
-};
 
 struct LogMessage {
     LogLevel level;
@@ -81,7 +53,55 @@ struct LogMessage {
     char taskName[16];
 };
 
-// Interface de sortie pour le logger
+
+/**
+ * @brief Time provider interface for timestamp generation
+ * 
+ * Provides both Unix timestamp and system uptime in milliseconds.
+ * Implementations should handle their specific RTC or time source.
+ */
+class TimeProvider {
+public:
+    virtual ~TimeProvider() = default;
+    virtual uint32_t getTimestamp() = 0;
+    virtual uint64_t getMillis() = 0;
+};
+
+/**
+ * @brief Default time provider using system millis()
+ * 
+ * Handles millis() overflow by tracking rollovers to maintain
+ * accurate 64-bit uptime counter. Does not provide real timestamp.
+ */
+class DefaultTime : public TimeProvider {
+private:
+    uint32_t lastMillis_ = 0;    // Dernière valeur de millis() vue
+    uint64_t overflows_ = 0;     // Nombre d'overflows détectés
+    
+public:
+    uint32_t getTimestamp() override { 
+        return 0;  // Pas de RTC, retourne 0
+    }
+
+    uint64_t getMillis() override {
+        uint32_t currentMillis = millis();
+        
+        // Détection de l'overflow
+        if (currentMillis < lastMillis_) {
+            overflows_++;  // On a fait un tour complet
+        }
+        lastMillis_ = currentMillis;
+        
+        return (overflows_ << 32) + currentMillis;
+    }
+};
+
+/**
+ * @brief Interface for log output
+ * 
+ * Implementations should handle their specific output type
+ * and provide methods to begin, print, and println.
+ */
 class ILogOutput {
 public:
     virtual ~ILogOutput() = default;
@@ -90,19 +110,23 @@ public:
     virtual void println(const char* message) = 0;
     virtual OutputType getType() const = 0;
 
-    inline void setLogFilter(LogFilter filter) {
-        logFilter_ = filter;
+    inline void setLogLevel(LogLevel level) {
+        level_ = level;
     }
 
-    LogFilter getLogFilter() const {
-        return logFilter_;
+    LogLevel getLogLevel() const {
+        return level_;
     }
 
 protected:
-    LogFilter logFilter_ = LogFilter::ALL;  // Par défaut, tout logger
+    LogLevel level_ = LogLevel::DEBUG;  // Par défaut, tout logger
 };
 
-// Sortie vers un port série
+/**
+ * @brief Serial output
+ * 
+ * Handles serial output with color coding for different log levels.
+ */
 class SerialLogger : public ILogOutput {
 public:
     explicit SerialLogger(HardwareSerial& serial, uint32_t baud = 115200) 
@@ -128,11 +152,14 @@ public:
             case LogLevel::WARNING:
                 serial_.print("\033[33m"); // Jaune
                 break;
+            case LogLevel::INFO:
+                serial_.print("\033[32m"); // Vert
+                break;
             case LogLevel::SYSTEM:
                 serial_.print("\033[34m"); // Bleu
                 break;
             case LogLevel::DEBUG:
-                serial_.print("\033[32m"); // Vert
+                serial_.print("\033[35m"); // Rose
                 break;
             default:
                 serial_.print("\033[37m"); // Blanc
@@ -151,7 +178,11 @@ private:
     uint32_t baud_;
 };
 
-// Sortie vers un fichier sur SD
+/**
+ * @brief SD output
+ * 
+ * Handles SD output with file rotation and level splitting.
+ */
 class SDLogger : public ILogOutput {
 public:
     struct Config {
@@ -351,7 +382,11 @@ private:
     }
 };
 
-// Sortie au format JSON vers un Stream
+/**
+ * @brief JSON output
+ * 
+ * Handles JSON output to a Print stream.
+ */
 class JsonLogger : public ILogOutput {
 public:
     explicit JsonLogger(Print& output) 
@@ -483,20 +518,29 @@ inline void logSystemStats() {
 
 } // namespace logger
 
+/**
+ * @brief Thread-safe logging system with multiple outputs and filtering capabilities
+ * 
+ * Singleton class that manages logging with the following features:
+ * - Multiple output support (Serial, SD card, JSON)
+ * - Per-output log filtering
+ * - FreeRTOS task-safe implementation
+ * - Timestamp support with RTC integration
+ * - Configurable queue size and task priority
+ */
 class MultiLogger {
 public:
     using LogLevel = logger::LogLevel;
-    using LogFilter = logger::LogFilter;
     using LogMessage = logger::LogMessage;
     using OutputType = logger::OutputType;
     using TimeProvider = logger::TimeProvider;
     using DefaultTime = logger::DefaultTime;  // Ajout de l'alias manquant
 
     struct Config {
-        TickType_t queueTimeout = pdMS_TO_TICKS(100);
-        UBaseType_t taskPriority = 1;
-        size_t queueSize = 8;
-        LogLevel minLevel = LogLevel::DEBUG;  // Niveau minimum de log
+        TickType_t queueTimeout = pdMS_TO_TICKS(100);    // Timeout for queue operations
+        UBaseType_t taskPriority = 1;                     // Priority of the logger task
+        size_t queueSize = 8;                            // Size of the message queue
+        LogLevel filter = LogLevel::ALL;                // Global log filter level
     };
 
     inline void setConfig(const Config& config) {
@@ -509,6 +553,11 @@ public:
     }
 
     void addOutput(logger::ILogOutput& output) {
+        outputs_.push_back(&output);
+    }
+
+    void addOutput(logger::ILogOutput& output, LogLevel filter) {
+        output.setLogLevel(filter);
         outputs_.push_back(&output);
     }
 
@@ -541,7 +590,20 @@ public:
     }
 
     bool log(LogLevel level, const char* file, int line, const char* message) {
-        if (!isLevelEnabled(level)) return true;
+        // Check first if at least one output will accept this level
+        bool anyOutputWillAccept = false;
+        for (auto* output : outputs_) {
+            if (isLevelEnabled(level, output->getLogLevel())) {
+                anyOutputWillAccept = true;
+                break;
+            }
+        }
+
+        // If no output will accept this level, don't put it in the queue
+        if (!anyOutputWillAccept) {
+            return true;  // Success because it's a normal filter
+        }
+
         if (logQueue_ == nullptr || file == nullptr || message == nullptr) {
             return false;
         }
@@ -560,7 +622,7 @@ public:
         strncpy(msg.message, message, MAX_MESSAGE - 1);
         msg.message[MAX_MESSAGE - 1] = '\0';
 
-        // Gestion sécurisée du nom de tâche
+        // Nom de la tâche courante
         TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
         const char* taskName = currentTask ? pcTaskGetName(currentTask) : nullptr;
         if (taskName) {
@@ -570,39 +632,28 @@ public:
             strcpy(msg.taskName, "unknown");
         }
 
-        if (xQueueSend(logQueue_, &msg, config_.queueTimeout) != pdTRUE) {
-            return false;
-        }
-
-        return true;
+        return xQueueSend(logQueue_, &msg, config_.queueTimeout) == pdTRUE;
     }
 
     inline void setTimeProvider(TimeProvider& provider) {
         timeProvider_.current = &provider;
     }
 
-    inline void setLogFilter(LogFilter filter) {
-        logFilter_ = filter;
+    inline void setLogFilter(LogLevel filter) {
+        config_.filter = filter;
     }
 
     inline bool isLevelEnabled(LogLevel level) const {
-        return isLevelEnabled(level, logFilter_);
+        return isLevelEnabled(level, config_.filter);
     }
 
-    bool isLevelEnabled(LogLevel level, LogFilter filter) const {
-        switch (filter) {
-            case LogFilter::NONE:
-                return false;
-            case LogFilter::ALERTS:
-                return level == LogLevel::ALERT || level == LogLevel::WARNING;
-            case LogFilter::ALL:
-            default:
-                return true;
-        }
+    bool isLevelEnabled(LogLevel messageLevel, LogLevel filterLevel) const {
+        if (filterLevel == LogLevel::NONE) return false;
+        return messageLevel <= filterLevel;  // Les niveaux sont ordonnés du plus critique au moins critique
     }
 
     ~MultiLogger() {
-        // Attendre que tous les messages soient traités
+        // Wait for all messages to be processed
         if (logQueue_) {
             const TickType_t xMaxBlockTime = pdMS_TO_TICKS(1000);  // 1 seconde max
             TickType_t xTimeWaited = 0;
@@ -612,7 +663,7 @@ public:
                 xTimeWaited += pdMS_TO_TICKS(10);
             }
 
-            // Nettoyage des ressources
+            // Clean up resources
             vQueueDelete(logQueue_);
             logQueue_ = nullptr;
         }
@@ -622,29 +673,29 @@ public:
             loggerTaskHandle_ = nullptr;
         }
 
-        // Vider les buffers
+        // Clear buffers
         memset(formatBuffer_, 0, FORMAT_BUFFER);
         memset(timestampBuffer_, 0, TIMESTAMP_BUFFER_SIZE);
     }
 
 private:
-    // Constantes pour les tailles de buffer
     static constexpr size_t MAX_FILENAME = 64;
     static constexpr size_t MAX_MESSAGE = 128;
     static constexpr size_t MAX_TASKNAME = 16;
     static constexpr size_t FORMAT_BUFFER = 512;
     static constexpr size_t TIMESTAMP_BUFFER_SIZE = 32;
 
-    // Buffers réutilisables
     char formatBuffer_[FORMAT_BUFFER];
     char timestampBuffer_[TIMESTAMP_BUFFER_SIZE];
 
     QueueHandle_t logQueue_;
     TaskHandle_t loggerTaskHandle_;
     std::vector<logger::ILogOutput*> outputs_;
-    Config config_;
-    LogFilter logFilter_ = LogFilter::ALL;  // Par défaut, tout logger
+    Config config_; 
 
+    /**
+     * @brief Static time provider
+     */
     struct StaticTimeProvider {
         DefaultTime defaultTime;     // Maintenant DefaultTime est défini
         TimeProvider* current;
@@ -661,6 +712,11 @@ private:
     {
     }
 
+    /**
+     * @brief Logger task
+     * 
+     * @param parameter The parameter to pass to the task
+     */
     static void loggerTask(void* parameter) {
         MultiLogger* logger = static_cast<MultiLogger*>(parameter);
         LogMessage msg;
@@ -672,6 +728,12 @@ private:
         }
     }
 
+    /**
+     * @brief Get the file name from a full path
+     * 
+     * @param fullPath The full path to the file
+     * @return The file name
+     */
    inline const char* getFileName(const char* fullPath) {
         const char* fileName = strrchr(fullPath, '/');
         if (fileName) {
@@ -686,12 +748,17 @@ private:
         return fullPath;
     }
 
+    /**
+     * @brief Process a log message
+     * 
+     * @param msg The log message to process
+     */
     void processLogMessage(const LogMessage& msg) {
         formatTimestamp(msg.timestamp, msg.uptime, timestampBuffer_, sizeof(timestampBuffer_));
         
         for (auto* output : outputs_) {
-            // Vérifier si ce niveau doit être loggé pour cette sortie
-            if (!isLevelEnabled(msg.level, output->getLogFilter())) {
+            // Vérification du filtre par sortie
+            if (!isLevelEnabled(msg.level, output->getLogLevel())) {
                 continue;
             }
 
@@ -715,6 +782,13 @@ private:
         }
     }
 
+    /**
+     * @brief Format and send a log message to a serial output
+     * 
+     * @param output The serial output to send the log message to
+     * @param msg The log message to format and send
+     * @param timestamp The timestamp to use in the log message
+     */
     void formatAndSendSerial(logger::SerialLogger* output, 
                            const LogMessage& msg,
                            const char* timestamp) {
@@ -733,6 +807,14 @@ private:
         output->println(")");
     }
 
+    /**
+     * @brief Format a timestamp
+     * 
+     * @param timestamp The timestamp to format
+     * @param ms The milliseconds to format
+     * @param buffer The buffer to store the formatted timestamp
+     * @param bufferSize The size of the buffer
+     */
     void formatTimestamp(uint32_t timestamp, uint64_t ms, char* buffer, size_t bufferSize) {
         if (timeProvider_.current->getTimestamp() > 0) {
             time_t t = timestamp;
@@ -769,20 +851,28 @@ private:
     
     inline const char* getLevelString(LogLevel level) {
         switch (level) {
+            case LogLevel::NONE:    return "NONE";
             case LogLevel::ALERT:   return "ALERT";
             case LogLevel::WARNING: return "WARNING";
-            case LogLevel::DEBUG: return "DEBUG";
+            case LogLevel::INFO:    return "INFO";
             case LogLevel::SYSTEM:  return "SYSTEM";
-            default:                return "UNKNOWN";
+            case LogLevel::DEBUG:   return "DEBUG";
+            default:               return "UNKNOWN";
         }
     }
     
+    /**
+     * @brief Format a log message for console output
+     * 
+     * @param output The output to format the log message for
+     * @param msg The log message to format
+     * @param timestamp The timestamp to use in the log message
+     */
     void formatStandardOutput(logger::ILogOutput* output, 
                             const LogMessage& msg,
                             const char* timestamp) {
-        // Format selon le type de sortie
         if (output->getType() == OutputType::SD) {
-            // Format CSV pour SD
+            // Format CSV inchangé pour SD
             snprintf(formatBuffer_, sizeof(formatBuffer_),
                     "%s,%s,%s,%s,%s:%d",
                     timestamp,
@@ -792,12 +882,13 @@ private:
                     getFileName(msg.file),
                     msg.line);
         } else {
-            // Format ASCII pour les autres
+            // Nouveau format ASCII plus compact
             snprintf(formatBuffer_, sizeof(formatBuffer_), 
-                    "%s [%s] %s (%s:%d)",
+                    "%s [%s] %s (%s@%s:%d)",
                     timestamp,
                     getLevelString(msg.level),
                     msg.message,
+                    msg.taskName,
                     getFileName(msg.file),
                     msg.line);
         }
