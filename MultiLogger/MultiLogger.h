@@ -15,11 +15,11 @@
 //                            MACROS for logging
 //##############################################################################
 
-#define LOG_ERROR(...)   MultiLogger::getInstance().log(logger::LogLevel::ERROR, __FILE__, __LINE__, __VA_ARGS__)
-#define LOG_WARNING(...) MultiLogger::getInstance().log(logger::LogLevel::WARNING, __FILE__, __LINE__, __VA_ARGS__)
-#define LOG_INFO(...)    MultiLogger::getInstance().log(logger::LogLevel::INFO, __FILE__, __LINE__, __VA_ARGS__)
-#define LOG_SYSTEM(...) MultiLogger::getInstance().log(logger::LogLevel::SYSTEM, __FILE__, __LINE__, __VA_ARGS__)
-#define LOG_DEBUG(...)   MultiLogger::getInstance().log(logger::LogLevel::DEBUG, __FILE__, __LINE__, __VA_ARGS__)
+#define LOG_ERROR(fmt, ...)   MultiLogger::getInstance().logf(logger::LogLevel::ERROR, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_WARNING(fmt, ...) MultiLogger::getInstance().logf(logger::LogLevel::WARNING, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)    MultiLogger::getInstance().logf(logger::LogLevel::INFO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_SYSTEM(fmt, ...)  MultiLogger::getInstance().logf(logger::LogLevel::SYSTEM, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...)   MultiLogger::getInstance().logf(logger::LogLevel::DEBUG, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 
 namespace logger {
@@ -255,42 +255,10 @@ private:
     bool checkConnection() {
         unsigned long currentTime = millis();
         if (currentTime - lastCheckTime_ >= CHECK_INTERVAL) {
-            #ifdef ESP32
-                isConnected_ = Serial.availableForWrite() > 0;
-            #else
-                isConnected_ = serial_.availableForWrite() > 0;
-            #endif
+            isConnected_ = serial_.availableForWrite() > 0;
             lastCheckTime_ = currentTime;
         }
         return isConnected_;
-    }
-
-    void formatTimestamp(uint32_t timestamp, uint64_t ms, char* buffer, size_t bufferSize) {
-        if (timestamp > 0) {
-            time_t t = timestamp;
-            struct tm* timeinfo = gmtime(&t);
-            snprintf(buffer, bufferSize, 
-                    "%04d-%02d-%02d %02d:%02d:%02d.%03lu",
-                    timeinfo->tm_year + 1900,
-                    timeinfo->tm_mon + 1,
-                    timeinfo->tm_mday,
-                    timeinfo->tm_hour,
-                    timeinfo->tm_min,
-                    timeinfo->tm_sec,
-                    static_cast<unsigned long>(ms % 1000));
-        } else {
-            uint64_t totalMs = ms;
-            uint32_t hours = totalMs / 3600000;
-            uint32_t minutes = (totalMs % 3600000) / 60000;
-            uint32_t seconds = (totalMs % 60000) / 1000;
-            uint32_t millis = totalMs % 1000;
-            
-            snprintf(buffer, bufferSize, "%02lu:%02lu:%02lu.%03lu", 
-                    static_cast<unsigned long>(hours), 
-                    static_cast<unsigned long>(minutes), 
-                    static_cast<unsigned long>(seconds), 
-                    static_cast<unsigned long>(millis));
-        }
     }
 };
 
@@ -407,7 +375,7 @@ private:
     const char* basePath_;
     bool splitByLevel_;
     fs::File file_;  // Fichier unique en mode normal
-    std::array<fs::File, 4> levelFiles_;  // Un fichier par niveau en mode séparé
+    std::array<fs::File, 5> levelFiles_;  // Un fichier par niveau en mode séparé
     size_t writeCount_;
     static constexpr size_t FLUSH_INTERVAL = 10;
 
@@ -719,6 +687,24 @@ public:
         return messageLevel <= filterLevel;  // Les niveaux sont ordonnés du plus critique au moins critique
     }
 
+    template<typename... Args>
+    bool logf(LogLevel level, const char* file, int line, const char* format, Args... args) {
+        char buffer[MAX_MESSAGE];
+        int result = snprintf(buffer, sizeof(buffer), format, args...);
+        
+        if (result < 0 || result >= sizeof(buffer)) {
+            // En cas d'erreur de formatage ou de dépassement
+            strncpy(buffer, "Error formatting message", sizeof(buffer) - 1);
+            buffer[sizeof(buffer) - 1] = '\0';
+        }
+        
+        return log(level, file, line, buffer);
+    }
+
+    bool logf(LogLevel level, const char* file, int line, const char* message) {
+        return log(level, file, line, message);
+    }
+
     ~MultiLogger() {
         // Wait for all messages to be processed
         if (logQueue_) {
@@ -739,10 +725,6 @@ public:
             vTaskDelete(loggerTaskHandle_);
             loggerTaskHandle_ = nullptr;
         }
-
-        // Clear buffers
-        memset(formatBuffer_, 0, FORMAT_BUFFER);
-        memset(timestampBuffer_, 0, TIMESTAMP_BUFFER_SIZE);
     }
 
 private:
@@ -750,16 +732,11 @@ private:
     static constexpr size_t MAX_FILENAME = 64;
     static constexpr size_t MAX_MESSAGE = 256;
     static constexpr size_t MAX_TASKNAME = 16;
-    static constexpr size_t FORMAT_BUFFER = 512;
-    static constexpr size_t TIMESTAMP_BUFFER_SIZE = 32;
     
     // Paramètres FreeRTOS hardcodés
     static constexpr size_t QUEUE_SIZE = 8;
     static constexpr TickType_t QUEUE_TIMEOUT = pdMS_TO_TICKS(100);
     static constexpr UBaseType_t TASK_PRIORITY = 1;
-
-    char formatBuffer_[FORMAT_BUFFER];
-    char timestampBuffer_[TIMESTAMP_BUFFER_SIZE];
 
     QueueHandle_t logQueue_;
     TaskHandle_t loggerTaskHandle_;

@@ -317,5 +317,3 @@ public:
 - SD write failure: Automatic recovery attempt
 - Serial disconnection: Messages suppressed
 - Time provider failure: Fallback to uptime only
-
-This documentation reflects the latest changes to the MultiLogger system, focusing on clarity, completeness, and practical usage examples.
