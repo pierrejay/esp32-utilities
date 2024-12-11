@@ -50,6 +50,61 @@ void setup() {
 }
 ```
 
+## Log Messages Formatting
+
+### Format String Support
+
+The logger supports printf-style format strings for all logging levels:
+
+```cpp
+// Basic message without formatting
+LOG_INFO("System started");
+
+// Temperature with one decimal place
+float temp = 23.5;
+LOG_INFO("Temperature: %.1f°C", temp);
+
+// Multiple values with different formats
+float temp = 23.5;
+int humidity = 65;
+uint32_t pressure = 1013;
+LOG_INFO("Temp: %.1f°C, Humidity: %d%%, Pressure: %lu hPa", temp, humidity, pressure);
+
+// Hex values for debugging
+uint16_t raw_value = 0xA531;
+LOG_DEBUG("Raw sensor value: 0x%04X", raw_value);
+
+// Padded values for alignment
+LOG_INFO("Temperature: %6.1f°C", temp);     // Right-aligned, one decimal
+LOG_INFO("Humidity: %-3d%%", humidity);     // Left-aligned, 3 characters
+```
+
+### Format Specifications
+
+The logger supports all standard printf format specifiers:
+- `%d`, `%i`: Signed decimal integer
+- `%u`: Unsigned decimal integer
+- `%x`, `%X`: Hexadecimal (lowercase/uppercase)
+- `%f`, `%F`: Floating point
+- `%e`, `%E`: Scientific notation
+- `%g`, `%G`: Shortest representation
+- `%c`: Single character
+- `%s`: String
+- `%p`: Pointer address
+
+Format modifiers are also supported:
+- Width and precision (e.g., `%6.2f`)
+- Left alignment (`%-10s`)
+- Zero padding (`%04d`)
+- Sign forcing (`%+f`)
+- Space for sign (`% f`)
+
+### Buffer Management
+
+- Maximum message length: 256 characters (including format expansion)
+- Messages exceeding the buffer size are truncated
+- Format errors are caught and reported
+
 ## Configuration Management
 
 ### Instance Creation and Parameters
