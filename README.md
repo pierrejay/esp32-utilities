@@ -1,11 +1,11 @@
-# ESP-32 Utilities
+# ESP32 Utilities
 
-A collection of lightweight, "header-only" C++ utilities for IoT/embedded applications on ESP-32.
+A collection of lightweight, "header-only" C++ utilities for IoT/embedded applications on ESP32.
 
 Originally developed for the Arduino framework :
 - Some components may depend on Arduino (String, Serial, digitalWrite...)
 - Some may use FreeRTOS or ESP-IDF primitives (peripherals, timers, tasks...)
-- No external dependencies to the ESP-32 Arduino core
+- No external dependencies to the ESP32 Arduino core except `ArduinoJson` for the logger library
 
 ## Contents
 - `AsyncSerial` : a thread-safe UART library, offering a drop-in replacement to the `Serial` API with efficient management of concurrent access.
