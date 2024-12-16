@@ -18,6 +18,8 @@ public:
         , _sequenceStart(0)
         , _continuous(false)
         , _initialized(false)
+        , _autoUpdate(false)
+        , _taskHandle(NULL)
     {
     }
     
@@ -63,6 +65,24 @@ public:
         _lastToggle = millis();
         _sequenceStart = _lastToggle;
         update();
+    }
+    
+    // Configuration du mode de mise à jour
+    void enableAutoUpdate(bool enable = true) {
+        _autoUpdate = enable;
+        if (enable) {
+            xTaskCreate(
+                updateTask,        // Fonction de la tâche
+                "LED_Blinker",    // Nom pour le debug
+                1024,             // Stack size
+                this,             // Paramètre passé à la tâche
+                1,                // Priorité
+                &_taskHandle      // Handle de la tâche
+            );
+        } else if (_taskHandle != NULL) {
+            vTaskDelete(_taskHandle);
+            _taskHandle = NULL;
+        }
     }
     
     // Mise à jour de l'état de la LED
@@ -123,6 +143,17 @@ private:
     unsigned long _sequenceStart; // Début de la séquence actuelle
     
     bool _continuous;             // Mode continu (true) ou séquence (false)
+    bool _autoUpdate;             // Mode de mise à jour automatique
+    TaskHandle_t _taskHandle;     // Handle de la tâche de mise à jour
+
+    // Tâche statique pour la mise à jour
+    static void updateTask(void* parameters) {
+        LedBlinker* blinker = static_cast<LedBlinker*>(parameters);
+        while (true) {
+            blinker->update();
+            vTaskDelay(pdMS_TO_TICKS(10)); // Délai de 10ms entre les mises à jour
+        }
+    }
     
     void toggleLed() {
         _isOn = !_isOn;
