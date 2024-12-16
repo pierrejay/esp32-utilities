@@ -5,11 +5,11 @@
 #include <functional>
 #include <algorithm>
 
-// Ajout après les includes
+
 static constexpr size_t MAX_I2C_BUFFER_SIZE = 32;
 
-// Résultats
-struct WireResult {
+
+struct WireOperationResult {
     enum Error {
         SUCCESS = 0,
         NACK_ADDRESS = 2,
@@ -36,15 +36,15 @@ struct WireResult {
     }
 };
 
-struct SequenceResult {
-    std::vector<WireResult> operations;
+struct WireSequenceResult {
+    std::vector<WireOperationResult> operations;
     
-    WireResult& final() { return operations.back(); }
-    const WireResult& final() const { return operations.back(); }
+    WireOperationResult& final() { return operations.back(); }
+    const WireOperationResult& final() const { return operations.back(); }
     
     bool isSuccessful() const {
         return std::all_of(operations.begin(), operations.end(),
-            [](const WireResult& r) { return r.isOk(); });
+            [](const WireOperationResult& r) { return r.isOk(); });
     }
     
     String getErrorDetails() const {
@@ -58,10 +58,9 @@ struct SequenceResult {
     }
 };
 
-// Gestionnaire centralisé
 class AsyncWire {
 public:
-    struct Operation {
+    struct WireOperation {
         enum Type { BEGIN, WRITE, END, REQUEST } type;
         uint8_t address;
         const uint8_t* data;
@@ -69,37 +68,46 @@ public:
         bool sendStop;
     };
 
-    using Sequence = std::vector<Operation>;
-    using CompletionCallback = std::function<void(const SequenceResult&)>;
+    using WireSequence = std::vector<WireOperation>;
+    using WireCallback = std::function<void(const WireSequenceResult&)>;
 
     static AsyncWire& instance() {
         static AsyncWire instance;
         return instance;
     }
 
-    void executeSequence(const Sequence& sequence, CompletionCallback callback) {
-        QueueItem item{
-            .sequence = sequence,
-            .callback = callback,
-            .result = SequenceResult{std::vector<WireResult>(sequence.size())}
-        };
-        xQueueSend(operationQueue, &item, portMAX_DELAY);
+    static void configure(TwoWire& wire, int sda = -1, int scl = -1, uint32_t frequency = 100000) {
+        auto& instance = AsyncWire::instance();
+        instance.wire = &wire;
+        if (sda != -1 && scl != -1) {
+            wire.begin(sda, scl, frequency);
+        } else {
+            wire.begin();
+        }
+        instance.wireInitialized = true;
+    }
+
+    bool isInitialized() const {
+        return wireInitialized;
     }
 
 private:
+    friend class WireSequenceBuilder;  // Ajout de cette ligne
+
     struct QueueItem {
-        Sequence sequence;
-        CompletionCallback callback;
-        SequenceResult result;
+        WireSequence sequence;
+        WireCallback callback;
+        WireSequenceResult result;
     };
 
     QueueHandle_t operationQueue;
-    TwoWire& wire;
+    TwoWire* wire;  // Changé en pointeur
     TaskHandle_t wireTask;
     static constexpr size_t QUEUE_SIZE = 32;
     static constexpr size_t STACK_SIZE = 4096;
+    bool wireInitialized;
 
-    AsyncWire(TwoWire& w = Wire) : wire(w) {
+    AsyncWire() : wire(&Wire), wireInitialized(false) {
         operationQueue = xQueueCreate(QUEUE_SIZE, sizeof(QueueItem));
         xTaskCreate(taskFunction, "Wire", STACK_SIZE, this, 3, &wireTask);
     }
@@ -139,78 +147,59 @@ private:
         return bytesRead;
     }
 
-    WireResult executeOperation(const Operation& op) {
-        WireResult result;
+    WireOperationResult executeOperation(const WireOperation& op) {
+        if (!wireInitialized) {
+            WireOperationResult result;
+            result.error = WireOperationResult::BUS_ERROR;
+            return result;
+        }
+
+        WireOperationResult result;
         
         switch (op.type) {
-            case Operation::BEGIN:
-                wire.beginTransmission(op.address);
+            case WireOperation::BEGIN:
+                wire->beginTransmission(op.address);
                 break;
                 
-            case Operation::WRITE:
-                result.bytesTransferred = wire.write(op.data, op.length);
+            case WireOperation::WRITE:
+                result.bytesTransferred = wire->write(op.data, op.length);
                 break;
                 
-            case Operation::END:
-                result.error = (WireResult::Error)wire.endTransmission(op.sendStop);
+            case WireOperation::END:
+                result.error = (WireOperationResult::Error)wire->endTransmission(op.sendStop);
                 break;
                 
-            case Operation::REQUEST:
+            case WireOperation::REQUEST:
                 if (op.length > MAX_I2C_BUFFER_SIZE) {
-                    result.error = WireResult::BUS_ERROR;
+                    result.error = WireOperationResult::BUS_ERROR;
                     return result;
                 }
                 
-                result.bytesTransferred = wire.requestFrom(op.address, op.length, op.sendStop);
+                result.bytesTransferred = wire->requestFrom(op.address, op.length, op.sendStop);
                 if (result.bytesTransferred > 0) {
-                    result.bytesTransferred = readToBuffer(wire, result.buffer, result.bytesTransferred);
+                    result.bytesTransferred = readToBuffer(*wire, result.buffer, result.bytesTransferred);
                 }
                 break;
         }
         
         return result;
     }
-};
 
-// Interface non-bloquante
-class AsyncWireProxy {
-public:
-    void beginTransmission(uint8_t address, std::function<void(const SequenceResult&)> callback) {
-        WireSequenceBuilder()
-            .beginTransmission(address)
-            .execute(callback);
-    }
-    
-    void write(const uint8_t* data, size_t length, 
-               std::function<void(const SequenceResult&)> callback) {
-        WireSequenceBuilder()
-            .write(data, length)
-            .execute(callback);
-    }
-    
-    void write(uint8_t byte, std::function<void(const SequenceResult&)> callback) {
-        write(&byte, 1, callback);
-    }
-    
-    void endTransmission(bool sendStop, 
-                        std::function<void(const SequenceResult&)> callback) {
-        WireSequenceBuilder()
-            .endTransmission(sendStop)
-            .execute(callback);
-    }
-    
-    void requestFrom(uint8_t address, size_t length, bool sendStop,
-                    std::function<void(const SequenceResult&)> callback) {
-        WireSequenceBuilder()
-            .requestFrom(address, length, sendStop)
-            .execute(callback);
+protected:
+    void executeSequence(const WireSequence& sequence, WireCallback callback) {
+        QueueItem item{
+            .sequence = sequence,
+            .callback = callback,
+            .result = WireSequenceResult{std::vector<WireOperationResult>(sequence.size())}
+        };
+        xQueueSend(operationQueue, &item, portMAX_DELAY);
     }
 };
 
 // Interface bloquante compatible Wire
 class BlockingWireProxy {
 private:
-    SequenceResult lastResult;
+    WireSequenceResult lastResult;
     SemaphoreHandle_t semaphore;
 
 public:
@@ -221,7 +210,7 @@ public:
     void beginTransmission(uint8_t address) {
         WireSequenceBuilder()
             .beginTransmission(address)
-            .execute([this](const SequenceResult& result) {
+            .execute([this](const WireSequenceResult& result) {
                 lastResult = result;
                 xSemaphoreGive(semaphore);
             });
@@ -232,7 +221,7 @@ public:
     size_t write(const uint8_t* data, size_t length) {
         WireSequenceBuilder()
             .write(data, length)
-            .execute([this](const SequenceResult& result) {
+            .execute([this](const WireSequenceResult& result) {
                 lastResult = result;
                 xSemaphoreGive(semaphore);
             });
@@ -248,7 +237,7 @@ public:
     uint8_t endTransmission(bool sendStop = true) {
         WireSequenceBuilder()
             .endTransmission(sendStop)
-            .execute([this](const SequenceResult& result) {
+            .execute([this](const WireSequenceResult& result) {
                 lastResult = result;
                 xSemaphoreGive(semaphore);
             });
@@ -260,7 +249,7 @@ public:
     size_t requestFrom(uint8_t address, size_t length, bool sendStop = true) {
         WireSequenceBuilder()
             .requestFrom(address, length, sendStop)
-            .execute([this](const SequenceResult& result) {
+            .execute([this](const WireSequenceResult& result) {
                 lastResult = result;
                 xSemaphoreGive(semaphore);
             });
@@ -275,7 +264,7 @@ class WireSequenceBuilder {
 public:
     WireSequenceBuilder& beginTransmission(uint8_t address) {
         sequence.push_back({
-            .type = AsyncWire::Operation::BEGIN,
+            .type = AsyncWire::WireOperation::BEGIN,
             .address = address
         });
         return *this;
@@ -283,7 +272,7 @@ public:
 
     WireSequenceBuilder& write(const uint8_t* data, size_t length) {
         sequence.push_back({
-            .type = AsyncWire::Operation::WRITE,
+            .type = AsyncWire::WireOperation::WRITE,
             .data = data,
             .length = length
         });
@@ -296,7 +285,7 @@ public:
 
     WireSequenceBuilder& endTransmission(bool sendStop = true) {
         sequence.push_back({
-            .type = AsyncWire::Operation::END,
+            .type = AsyncWire::WireOperation::END,
             .sendStop = sendStop
         });
         return *this;
@@ -304,7 +293,7 @@ public:
 
     WireSequenceBuilder& requestFrom(uint8_t address, size_t length, bool sendStop = true) {
         sequence.push_back({
-            .type = AsyncWire::Operation::REQUEST,
+            .type = AsyncWire::WireOperation::REQUEST,
             .address = address,
             .length = length,
             .sendStop = sendStop
@@ -327,10 +316,10 @@ public:
                .requestFrom(address, length);
     }
 
-    void execute(AsyncWire::CompletionCallback callback) {
+    void execute(AsyncWire::WireCallback callback) {
         AsyncWire::instance().executeSequence(sequence, callback);
     }
 
 private:
-    AsyncWire::Sequence sequence;
+    AsyncWire::WireSequence sequence;
 };
