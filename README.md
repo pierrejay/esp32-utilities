@@ -7,6 +7,7 @@ Originally developed for the Arduino framework :
 - Some may use FreeRTOS or ESP-IDF primitives (peripherals, timers, tasks...)
 - No external dependencies to the ESP-32 Arduino core
 
+## Contents
 - `AsyncSerial` : a thread-safe UART library, offering a drop-in replacement to the `Serial` API with efficient management of concurrent access.
 - `AsyncWire` : a thread-safe I2C library, offering a drop-in replacement to the `Wire` API with intuitive Wire sequences declaration.
 - `LedBlinker`: a simple and flexible Arduino library for controlling LED blinking patterns with FreeRTOS support.
@@ -15,7 +16,7 @@ Originally developed for the Arduino framework :
 - `SerialConverter`: a simple utility class for converting between raw bytes and common serial formats (Hex, Base64)
 - `SimpleTimer`: a lightweight and versatile timer class for ESP32
 
-Most utilities could be easily transposed to other hardware platforms or bare-metal C++ if required.
+## Documentation
 
 See individual components for specific requirements and documentation.
 
