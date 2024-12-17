@@ -177,18 +177,16 @@ public:
 
     // Used for tests
     uint32_t waitForPulses(uint32_t targetPulses) {
+        // Désactiver le polling pendant le test pour éviter les interférences
+        stopPolling();
+        
         resetCount();
         waitForFirstPulse();
         resetCount();
         
         uint32_t startTime = esp_timer_get_time();
-        while (true) {
-            portENTER_CRITICAL(&counterMutex);
-            uint32_t count = totalCount;
-            portEXIT_CRITICAL(&counterMutex);
-            
-            if (count >= targetPulses) break;
-            // Plus de délai - on veut la meilleure précision possible
+        while (totalCount < targetPulses) {
+            poll();
         }
         return esp_timer_get_time() - startTime;
     }
