@@ -110,10 +110,10 @@ PulseCounter(
 
 ### Static Methods
 
-#### `static void startPollingGlobal()`
+#### `static void startPolling()`
 Starts the global polling timer for all counters.
 
-#### `static void stopPollingGlobal()`
+#### `static void stopPolling()`
 Stops the global polling timer.
 
 ### Instance Methods
@@ -143,10 +143,13 @@ Returns current sample time in milliseconds.
 - Automatically polls all active counters
 - Thread-safe operation with portENTER_CRITICAL
 - Minimal overhead per counter
+
 The global polling system uses a fixed 1 ms interval to update all counters. This value is sufficient for the majority of use cases, ensuring accurate pulse counting and frequency measurement without overloading the CPU.
-At a 1 ms interval, the library can handle signals with up to 3 MHz pulse frequency (30,000 pulses per interval) reliably using ESP32's hardware PCNT capabilities.
-However, you can override this value by providing an argument when starting polling if you need higher frequencies, or to further decrease CPU load in case of lower frequencies :
-`static void startPollingGlobal(uint32_t intervalUs = 1000)`
+
+At a 1 ms interval, the library can handle signals with up to 3 MHz pulse frequency (30,000 pulses per interval) reliably using ESP32's hardware PCNT capabilities. The main constraint is to avoid its internal counter to overflow (which is a signed int32 = up to 32,767). The library internally handles 1 overflow, which means you should be safe even if 1 tick of the polling timer is missed.
+
+You can override this value by providing an argument when starting polling if you need higher frequencies, or to further decrease CPU load in case of lower frequencies :
+`static void startPolling(uint32_t intervalUs = 1000)`
 
 ### Counter Management
 - Static array manages up to 8 counter instances
@@ -164,9 +167,8 @@ However, you can override this value by providing an argument when starting poll
 
 ### Limitations
 - Maximum of 8 simultaneous counters (ESP32 hardware limit)
-- Single channel operation (PCNT_CHANNEL_0 only)
 - Global polling interval affects all counters
-- High-frequency signals may require very short polling intervals
+- High-frequency signals (> 1 MHz) may require very short polling intervals
 
 ### Best Practices
 1. Select proper sample time:
@@ -177,7 +179,7 @@ However, you can override this value by providing an argument when starting poll
 2. Configure hardware filter:
    - Mechanical switches: 8000-16000 cycles (100-200µs)
    - Electronic signals: 0-800 cycles (0-10µs)
-   - High-speed signals: Disable filter (0)
+   - High-speed signals (> 100 kHz): Disable filter (0)
 
 ### Performance
 The library has been tested on ESP32-S3 and provides exceptional accuracy across a wide frequency range. The hardware-based implementation ensures reliable operation even under heavy system load.

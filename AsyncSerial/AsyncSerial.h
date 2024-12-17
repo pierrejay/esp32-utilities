@@ -106,21 +106,21 @@ public:
         // Ne fait rien, la terminaison doit être faite via AsyncSerial::getInstance().end()
     }
 
-    // Méthodes d'écriture supplémentaires pour la compatibilité
+    // Additional write methods for compatibility
     size_t write(const uint8_t *buffer, size_t size) override { 
         return _txBuffer.write(buffer, size) ? size : 0; 
     }
 
-    // Méthodes de configuration du timeout
+    // Timeout configuration methods
     void setTimeout(unsigned long timeout) { _timeout = timeout; }
     unsigned long getTimeout() const { return _timeout; }
 
-    // Méthode manquante pour la compatibilité avec Stream
+    // Missing method for compatibility with Stream
     int availableForWrite() override {
         return BUFFER_SIZE - _txBuffer.available();
     }
 
-    // Méthodes de lecture en bloc avec timeout
+    // Block reading methods with timeout
     size_t readBytes(uint8_t *buffer, size_t length) {
         size_t count = 0;
         unsigned long startMillis = millis();
@@ -192,7 +192,7 @@ public:
         return ret;
     }
 
-    // Méthodes inutiles mais implémentées pour la compatibilité
+    // Unused methods but implemented for compatibility
     bool find(char *target) { return false; }
     bool find(uint8_t *target, size_t length) { return false; }
     bool findUntil(char *target, char *terminator) { return false; }
@@ -266,18 +266,18 @@ public:
     }
 
    bool flush(SerialProxyBase* proxy) {
-        // Prendre immédiatement le lock
+        // Immediately acquire the lock
         _flushLock.acquire(proxy, [this]() { poll(); });
 
-        // Attendre que l'état WRITE termine
+        // Wait for the WRITE state to finish
         while (_state == State::WRITE || _state == State::READ) {
             poll();  // Continue de traiter l'état WRITE/READ jusqu'à ce qu'il se termine
         }
 
-        // Passe au mode FLUSH
+        // Switch to FLUSH mode
         _state = State::FLUSH;
 
-        // Bloque jusqu'à ce que le mode FLUSH soit terminé ou un timeout survienne
+        // Block until FLUSH mode is finished or a timeout occurs
         unsigned long startTime = millis();
         while (_state == State::FLUSH) {
             poll();
@@ -287,7 +287,7 @@ public:
             }
         }
 
-        // Libérer le lock après le flush
+        // Release the lock after flushing
         _flushLock.release(proxy);
         return true;  // Flush réussi
     }
@@ -297,20 +297,20 @@ public:
 
         switch (_state) {
             case State::IDLE:
-                // Transition vers READ si des données série sont disponibles
+                // Transition to READ if serial data is available
                 if (Serial.available()) {
                     _state = State::READ;
                 }
-                // Transition vers WRITE si un proxy a des données prêtes
+                // Transition to WRITE if a proxy has data ready
                 else {
                     for (size_t i = 0; i < _proxyCount; i++) {
                         if (_proxies[i].proxy->txAvailable() > 0) {
-                            _proxies[i].isActive = true;  // Active ce proxy
+                            _proxies[i].isActive = true;  // Indicate that this proxy is currently active
                             _state = State::WRITE;
                             break;
                         }
                     }
-                    if (_state == State::IDLE) delay(1);  // Libère le CPU si aucun proxy actif
+                    if (_state == State::IDLE) delay(1);  // Free the CPU if no active proxy
                 }
                 break;
 
@@ -332,24 +332,24 @@ public:
                     auto& state = _proxies[i];
                     if (!state.isActive) continue;
 
-                    // Respecte le délai inter-message
+                    // Respect the inter-message delay
                     if (millis() - state.lastTxTime < state.proxy->getInterMessageDelay()) {
-                        break;  // Attends avant d'envoyer un autre chunk
+                        break;  // Wait before sending another chunk
                     }
 
-                    // Envoie un chunk
+                    // Send a chunk
                     sendChunk(state.proxy);
 
-                    // Met à jour le délai inter-message après l'envoi
+                    // Update the inter-message delay after sending
                     state.lastTxTime = millis();
 
-                    // Si le buffer est vide, désactive le proxy
+                    // If the buffer is empty, deactivate the proxy
                     if (state.proxy->txAvailable() == 0) {
                         state.isActive = false;
-                        _state = State::IDLE;  // Reviens à IDLE une fois terminé
+                        _state = State::IDLE;  // Return to IDLE once finished
                         return;
                     }
-                    break;  // Un seul proxy actif à la fois
+                    break;  // Only one proxy active at a time
                 }
                 break;
 
@@ -358,21 +358,21 @@ public:
                 SerialProxyBase* proxy = _flushLock.getOwner();
                 unsigned long startTime = millis();
 
-                Serial.flush();  // S'assure que le buffer série est vide avant de commencer
+                Serial.flush();  // Ensure the serial buffer is empty before starting
 
-                // Vider le buffer du proxy chunk par chunk
+                // Empty the proxy buffer chunk by chunk
                 while (proxy->txAvailable() > 0) {
                     sendChunk(proxy);
 
-                    // Vérifie si le timeout est atteint
+                    // Check if the timeout is reached
                     if (millis() - startTime >= SERIAL_TIMEOUT) {
                         break;
                     }
                 }
 
-                Serial.flush();  // S'assure que le dernier chunk est bien transmis
+                Serial.flush();  // Ensure the last chunk is transmitted
 
-                // Vérifie si le buffer du proxy est vide
+                // Check if the proxy buffer is empty
                 if (proxy->txAvailable() == 0) {
                     _state = State::IDLE;
                 } 
@@ -402,7 +402,7 @@ private:
     struct ProxyState {
         SerialProxyBase* proxy;
         unsigned long lastTxTime;
-        bool isActive;  // Indique si le proxy est actuellement actif
+        bool isActive;  // Indicate that this proxy is currently active
     };
 
     State _state = State::IDLE;
@@ -412,7 +412,7 @@ private:
 
     void sendChunk(SerialProxyBase* proxy) {
         size_t availableSpace = Serial.availableForWrite();
-        if (availableSpace == 0) return;  // Rien à envoyer si le buffer série est plein
+        if (availableSpace == 0) return;  // Nothing to send if the serial buffer is full
 
         size_t toSend = min(availableSpace, proxy->txAvailable());
 

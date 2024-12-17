@@ -17,7 +17,6 @@ Originally developed for the Arduino framework :
 - `SimpleTimer`: a lightweight and versatile timer class for ESP32
 
 ## Documentation
-
 See individual components for specific requirements and documentation.
 
 ## License
