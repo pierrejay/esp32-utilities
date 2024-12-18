@@ -12,7 +12,7 @@
 
 ### Drop-in Serial Replacement
 AsyncSerial is designed to be a direct replacement for Arduino's Serial interface:
-- Each SerialProxy implements the standard `Stream` interface
+- Each `SerialProxy` implements the standard `Stream` interface
 - Identical method signatures (`print`, `println`, `write`, `read`, `available`, etc.)
 - Compatible with existing libraries that use Serial communication
 - Same behavior for string formatting and special characters handling
@@ -26,9 +26,79 @@ AsyncSerial is designed to be a direct replacement for Arduino's Serial interfac
 
 ### Thread Safety
 Non-blocking collaboration between threads through `CooperativeLock`, ideal for:
-- RTOS environments
+- RTOS environments (such as Arduino ESP32 with FreeRTOS)
 - Cooperative multitasking
 - Interrupt-driven architectures
+
+## Dual Port Type Support (HardwareSerial & HWCDC)
+
+### Overview
+
+AsyncSerial provides a unified interface for both HardwareSerial and HWCDC (USB CDC) ports through modern C++ template metaprogramming techniques.
+
+### Implementation
+
+#### SerialPort Wrapper
+
+```cpp
+class SerialPort {
+    enum class PortType { CDC, HARDWARE };
+    Stream* _port;      // Common base for operations
+    PortType _type;     // Runtime type information
+};
+```
+
+Key features:
+- Type-safe wrapper around different serial port implementations
+- Common Stream interface for shared operations
+- Specialized handling for port-specific operations
+
+#### Compile-Time Port Detection
+
+```cpp
+template<typename T>
+static PortType getPortType() {
+    if constexpr (std::is_same_v<T, HWCDC>) {
+        return PortType::CDC;
+    } else {
+        return PortType::HARDWARE;
+    }
+}
+```
+
+#### Type-Safe Construction
+
+```cpp
+template<typename T>
+SerialPort(T& serial) : _port(&serial), _type(getPortType<T>()) {
+    static_assert(std::is_base_of_v<Stream, T>, 
+                  "Serial port type must derive from Stream");
+}
+```
+
+#### Port-Specific Method Implementation
+
+```cpp
+void begin(unsigned long baud) {
+    if (_type == PortType::CDC) {
+        static_cast<HWCDC*>(_port)->begin();
+    } else {
+        static_cast<HardwareSerial*>(_port)->begin(baud);
+    }
+}
+```
+
+### Usage
+
+```cpp
+// Hardware Serial
+AsyncSerial uartSerial(Serial1);
+uartSerial.begin(9600);
+
+// USB CDC
+AsyncSerial usbSerial(Serial);
+usbSerial.begin(115200);
+```
 
 ## Key Components
 
@@ -41,8 +111,14 @@ The main driver class managing the physical UART:
 ### 2. SerialProxy
 A virtual serial port implementing the `Stream` interface:
 ```cpp
+AsyncSerial serial(Serial);
+serial.begin(115200);
+
 SerialProxy<1024> console;  // 1KB buffer
 SerialProxy<256> protocol;  // 256B buffer
+
+serial.registerProxy(&console);
+serial.registerProxy(&protocol);
 
 // Use exactly like Serial:
 console.println("Debug message");
@@ -100,9 +176,10 @@ long parseInt(char skipChar)            // Always returns 0
 
 1. **Configuration Methods**
 ```cpp
-// These don't actually configure the hardware
-proxy.begin(9600);    // No effect - use AsyncSerial::getInstance().begin() instead
-proxy.end();          // No effect - use AsyncSerial::getInstance().end() instead
+// These don't actually configure the hardware when called on the proxy.
+// Configure the hardware via AsyncSerial instance's begin()/end().
+proxy.begin(9600);    // No effect on physical port config
+proxy.end();          // No effect on physical port config
 ```
 
 2. **Blocking Operations**
@@ -121,21 +198,17 @@ SerialProxy<1024> proxy;  // Buffer size must be defined at compile time
 ## Thread Safety Considerations
 
 ### Thread-Safe Operations
-```cpp
-// Always thread-safe
-AsyncSerial::getInstance()  // Thread-safe singleton access
-proxy.flush()              // Protected by CooperativeLock
-AsyncSerial::poll()        // Thread-safe when used as intended
-```
+`flush()` is protected by `CooperativeLock`.  
+`poll()` is safe to call frequently from a dedicated task.
 
 ### Non-Thread-Safe Operations
 ```cpp
-// Must be called only during initialization
-AsyncSerial::begin()
-AsyncSerial::end()
-AsyncSerial::registerProxy()
+// Must be called only during initialization phase (e.g., in setup())
+asyncSerial.begin()
+asyncSerial.end()
+asyncSerial.registerProxy()
 
-// Must be synchronized externally if called from multiple threads (but all the point of this implementation is to allow one individual proxy per thread, so if you need to share a proxy between threads, you're probably doing something wrong)
+// Must be synchronized if called from multiple threads concurrently (but all the point of this implementation is to allow one individual proxy per thread, so if you need to share a proxy between threads, you're probably doing something wrong)
 proxy.write()
 proxy.read()
 proxy.available()
@@ -143,63 +216,67 @@ proxy.available()
 
 ### Initialization Pattern
 ```cpp
-// 0. Declare proxies as global objects
+AsyncSerial hwSerial(Serial1);
 SerialProxy<1024> debugProxy;
 SerialProxy<512> protocolProxy;
 
 void setup() {
     // 1. Initialize AsyncSerial first (non-thread-safe)
-    AsyncSerial::getInstance().begin(115200);
+    hwSerial.begin(115200);
     
     // 2. Register all proxies (non-thread-safe)
-    AsyncSerial::getInstance().registerProxy(&debugProxy);
-    AsyncSerial::getInstance().registerProxy(&protocolProxy);
+    hwSerial.registerProxy(&debugProxy);
+    hwSerial.registerProxy(&protocolProxy);
     
     // 3. After this, thread-safe operations can begin
-    startTasks();  // If using RTOS
+    // If using RTOS, create tasks now
 }
 ```
 
 ### RTOS Usage Notes
+
+Below is an example for Arduino ESP32 using FreeRTOS. We create a polling task to regularly call `poll()`, and another task to handle console input. We pass the `SerialProxy` instance to the task via `void* parameter` and cast it back inside the task.
+
 ```cpp
-// Dedicated polling task (recommended)
-void serialPollTask(void* parameter) {
+#include <Arduino.h>
+#include "AsyncSerial.h"
+#include <FreeRTOS.h>
+#include <task.h>
+
+AsyncSerial hwSerial(Serial1);
+SerialProxy<1024> consoleProxy;
+
+void pollingTask(void* parameter) {
     for (;;) {
-        AsyncSerial::getInstance().poll();
+        hwSerial.poll(); // Keep AsyncSerial state machine running
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
-// Data handling task
-void dataTask(void* parameter) {
-    SerialProxy<512>& proxy = *((SerialProxy<512>*)parameter);
+void consoleTask(void* parameter) {
+    SerialProxy<1024>& console = *((SerialProxy<1024>*)parameter);
     for (;;) {
-        // Read/write operations need external synchronization
-        taskENTER_CRITICAL();
-        if (proxy.available()) {
-            String data = proxy.readString();
+        if (console.available()) {
+            String line = console.readStringUntil('\n');
+            console.println("Received: " + line);
         }
-        taskEXIT_CRITICAL();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+
+void setup() {
+    hwSerial.begin(115200);
+    hwSerial.registerProxy(&consoleProxy);
+
+    // Create RTOS tasks
+    xTaskCreate(pollingTask, "PollingTask", 2048, NULL, 2, NULL);
+    xTaskCreate(consoleTask, "ConsoleTask", 2048, &consoleProxy, 1, NULL);
+}
+
+void loop() {
+    // Not used in RTOS environment
+}
 ```
-
-### Best Practices for Thread Safety
-
-1. **Initialization**
-   - Complete all AsyncSerial and proxy setup before starting threads/tasks
-   - Don't register new proxies after initialization
-
-2. **Polling**
-   - Use a dedicated high-priority task for polling in RTOS
-   - Ensure consistent polling frequency
-   - Don't call poll() from interrupt contexts
-
-3. **Critical Sections**
-   - Protect read/write operations when sharing a proxy between tasks
-   - Keep critical sections short
-   - Use RTOS primitives for synchronization if needed
 
 ## State Machine
 
@@ -233,28 +310,12 @@ public:
 
 ModbusPort modbusSerial;
 ModbusMaster node(1, modbusSerial);  // Works with ModbusMaster library
+
+// Initialize AsyncSerial and register modbusSerial similarly
 ```
 
 ### In RTOS Environment
-```cpp
-void debugTask(void* parameter) {
-    SerialProxy<1024>& debug = *((SerialProxy<1024>*)parameter);
-    for (;;) {
-        debug.println("Task running...");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
-
-void protocolTask(void* parameter) {
-    SerialProxy<512>& protocol = *((SerialProxy<512>*)parameter);
-    for (;;) {
-        if (protocol.available()) {
-            processProtocolData(protocol);
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
-```
+As shown above, you can create tasks for polling and for handling data on a given proxy. Each task receives the proxy pointer, casts it, and uses it as needed.
 
 ## Best Practices
 
@@ -271,7 +332,7 @@ void protocolTask(void* parameter) {
    - Consider protocol timing requirements
 
 3. **Polling Frequency**
-   - Call `poll()` in main loop or high-priority task
+   - Call `poll()` in the main loop or a dedicated RTOS task
    - Balance responsiveness vs CPU usage
    - Consider using timer interrupts for consistent polling
 
@@ -300,7 +361,7 @@ void protocolTask(void* parameter) {
 ## Appendix - `RingBuffer`
 
 ### Overview
-The `RingBuffer` is a templated circular buffer implementation that provides efficient, fixed-size FIFO (First-In-First-Out) operations. Key characteristics:
+The `RingBuffer` is a templated circular buffer implementation providing efficient, fixed-size FIFO operations:
 - Template parameters for type and size
 - No dynamic memory allocation
 - Thread-safe for single producer/single consumer
@@ -310,141 +371,50 @@ The `RingBuffer` is a templated circular buffer implementation that provides eff
 ```cpp
 template<typename T, size_t SIZE>
 class RingBuffer {
-    T _buffer[SIZE];      // Fixed-size array
-    size_t _readIndex;    // Next position to read
-    size_t _writeIndex;   // Next position to write
-    size_t _count;        // Current number of items
+    T _buffer[SIZE];
+    size_t _readIndex;
+    size_t _writeIndex;
+    size_t _count;
 }
 ```
 
 ### Key Operations
-
-#### Writing Data
 ```cpp
-// Single item write
 bool write(const T& data);
-
-// Bulk write
 bool write(const T* data, size_t length);
-```
-- Returns `false` if buffer would overflow
-- Writing maintains FIFO order
-- O(1) for single writes, O(n) for bulk writes
-
-#### Reading Data
-```cpp
-// Destructive read
 bool read(T& data);
-
-// Non-destructive read
 bool peek(T& data);
 ```
-- Returns `false` if buffer is empty
-- Reading preserves FIFO order
-- Both operations are O(1)
 
 ### Usage Example
 ```cpp
-RingBuffer<uint8_t, 256> buffer;  // 256-byte buffer
-
-// Writing data
+RingBuffer<uint8_t, 256> buffer;
 uint8_t data = 0x42;
-if (!buffer.write(data)) {
-    // Handle buffer full condition
-}
+buffer.write(data);
 
-// Bulk writing
 uint8_t bulk[4] = {1, 2, 3, 4};
-if (!buffer.write(bulk, 4)) {
-    // Handle insufficient space
-}
+buffer.write(bulk, 4);
 
-// Reading data
 uint8_t readData;
 if (buffer.read(readData)) {
-    // Process readData
-}
-
-// Peeking at next item
-uint8_t peekData;
-if (buffer.peek(peekData)) {
-    // Examine peekData without removing it
+    // process readData
 }
 ```
 
 ### Memory Efficiency
-- Size must be defined at compile time
-- Memory usage is exactly `sizeof(T) * SIZE + 3 * sizeof(size_t)`
-- No memory fragmentation
-- Indexes wrap around using modulo arithmetic
-
-### Best Practices
-
-1. **Size Selection**
-```cpp
-// Good - Power of 2 size for efficient modulo
-RingBuffer<uint8_t, 256> goodBuffer;   // 256 = 2^8
-RingBuffer<uint8_t, 512> alsoGood;     // 512 = 2^9
-
-// Avoid - Non-power of 2 size
-RingBuffer<uint8_t, 250> lessEfficient;  // Modulo is more expensive
-```
-
-2. **Overflow Handling**
-```cpp
-// Always check write operations
-uint8_t data[8];
-if (!buffer.write(data, sizeof(data))) {
-    // 1. Skip data
-    // 2. Wait and retry
-    // 3. Flush buffer first
-    // 4. Signal error condition
-}
-```
-
-3. **Empty Condition Handling**
-```cpp
-// Check before each read
-uint8_t data;
-while (buffer.peek(data)) {  // Non-destructive check
-    if (isValid(data)) {
-        buffer.read(data);    // Actually remove the data
-        process(data);
-    } else {
-        buffer.read(data);    // Discard invalid data
-    }
-}
-```
+- Fixed size at compile time
+- No fragmentation
+- Simple and predictable
 
 ### Integration with AsyncSerial
-
-The RingBuffer is used internally by each SerialProxy for both TX and RX:
-```cpp
-template<size_t BUFFER_SIZE = 1024>
-class SerialProxy : public SerialProxyBase {
-private:
-    RingBuffer<uint8_t, BUFFER_SIZE> _rxBuffer;  // Incoming data
-    RingBuffer<uint8_t, BUFFER_SIZE> _txBuffer;  // Outgoing data
-    //...
-};
-```
-
-This provides:
-- Independent buffers for each direction
-- Configurable size per proxy
-- Overflow protection
-- Efficient memory usage
-
-[Previous sections remain unchanged]
+Each `SerialProxy` uses two `RingBuffer`s internally for TX and RX, providing independent buffering and efficient handling of data.
 
 ## Appendix - `CooperativeLock`
 
 ### Overview
-The `CooperativeLock` is a lightweight synchronization primitive designed for cooperative multitasking. Unlike traditional mutex implementations, it:
+The `CooperativeLock` is a synchronization primitive designed for cooperative multitasking. Unlike traditional mutex implementations, it:
 - Never blocks completely
-- Allows work to be done while waiting
-- Uses atomic operations for thread safety
-- Is template-based for type safety
+- Allows useful work to be done while waiting
 
 ### Core Implementation
 ```cpp
@@ -457,7 +427,7 @@ public:
         T* expected = nullptr;
         while (!_owner.compare_exchange_weak(expected, owner)) {
             expected = nullptr;
-            poll();  // Do useful work while waiting
+            poll();  // Do useful work (e.g., call asyncSerial.poll())
         }
         return true;
     }
@@ -467,8 +437,8 @@ public:
         _owner.compare_exchange_strong(expected, nullptr);
     }
 
-    bool isOwnedBy(T* owner) const { 
-        return _owner.load() == owner; 
+    bool isOwnedBy(T* owner) const {
+        return _owner.load() == owner;
     }
 
 private:
@@ -478,25 +448,22 @@ private:
 
 ### Key Features
 
-#### 1. Type Safety
-```cpp
+1. **Type Safety**
 // Lock can only be used with the specified type
 CooperativeLock<SerialProxyBase> proxyLock;    // For proxies
 CooperativeLock<Task> taskLock;                // For tasks
-```
 
-#### 2. Atomic Operations
+2. **Atomic Operations**
 - Uses `std::atomic` for thread-safe operations
 - `compare_exchange_weak` for lock attempts
 - `compare_exchange_strong` for release
 - `load` for ownership checks
 
-#### 3. Cooperative Nature
+3. **Cooperative Nature**
 ```cpp
-// Instead of blocking:
-lock.acquire(&proxy, []() {
-    // Do useful work while waiting:
-    AsyncSerial::getInstance().poll();
+// Instead of blocking, poll is called
+lock.acquire(&proxy, [&]() {
+    hwSerial.poll();  // Keep system moving while waiting
 });
 ```
 
@@ -504,17 +471,12 @@ lock.acquire(&proxy, []() {
 
 #### 1. Flush Protection
 ```cpp
-// In AsyncSerial::flush
 bool AsyncSerial::flush(SerialProxyBase* proxy) {
-    // Take the lock, keep polling while waiting
-    _flushLock.acquire(proxy, [this]() { 
-        poll(); 
-    });
+    // Acquire lock and poll while waiting
+    _flushLock.acquire(proxy, [this]() { poll(); });
 
-    // Lock acquired, do the flush operation
     _state = State::FLUSH;
-    
-    // ... flush operation ...
+    // ... perform flush ...
 
     // Release the lock
     _flushLock.release(proxy);
@@ -527,19 +489,14 @@ bool AsyncSerial::flush(SerialProxyBase* proxy) {
 class CustomProxy : public SerialProxyBase {
 private:
     CooperativeLock<CustomProxy> _txLock;
-    
+
     bool sendMessage(const String& msg) {
         // Try to acquire lock with custom work
         _txLock.acquire(this, [this]() {
-            // Process incoming data while waiting
+            // Perform useful work while waiting for lock
             processRxBuffer();
-            // Keep serial operations moving
-            AsyncSerial::getInstance().poll();
         });
-        
-        // Lock acquired, send message
         bool result = doSendMessage(msg);
-        
         _txLock.release(this);
         return result;
     }
@@ -548,8 +505,10 @@ private:
 
 ### Best Practices
 
-#### 1. Keep Critical Sections Short
+#### **Keep Critical Sections Short**
+   - Acquire, do minimal work, release quickly
 ```cpp
+
 // Good - Short critical section
 lock.acquire(owner, callback);
 doQuickOperation();
@@ -561,7 +520,8 @@ doLengthyOperation();  // Others wait too long
 lock.release(owner);
 ```
 
-#### 2. Useful Work in Callbacks
+#### **Useful Work in Callbacks**
+   - Avoid busy-waiting
 ```cpp
 // Good - Productive waiting
 lock.acquire(&proxy, []() {
@@ -576,12 +536,14 @@ lock.acquire(&proxy, []() {
 });
 ```
 
-#### 3. Always Release
+#### **Always Release**
+   - Ensure lock is released after use (RAII patterns recommended)
 ```cpp
 // Good - RAII-style usage
 class LockGuard {
     CooperativeLock<T>& _lock;
     T* _owner;
+
 public:
     LockGuard(CooperativeLock<T>& lock, T* owner, 
               std::function<void()> poll) 
@@ -595,7 +557,6 @@ public:
 ```
 
 ### Performance Considerations
-
 1. **Memory Impact**
    - Single atomic pointer per lock
    - No additional memory allocation
@@ -612,32 +573,5 @@ public:
    - Fair access through polling
 
 ### Common Use Cases
-
-1. **Resource Protection**
-```cpp
-CooperativeLock<Resource> resourceLock;
-
-void useResource(Resource* resource) {
-    resourceLock.acquire(resource, []() {
-        // Work while waiting
-        doOtherStuff();
-    });
-    // Resource is now protected
-    resource->use();
-    resourceLock.release(resource);
-}
-```
-
-2. **State Synchronization**
-```cpp
-CooperativeLock<State> stateLock;
-
-void updateState(State* state) {
-    stateLock.acquire(state, []() {
-        // Keep system responsive
-        AsyncSerial::getInstance().poll();
-    });
-    state->update();
-    stateLock.release(state);
-}
-```
+- Resource protection (one writer at a time)
+- State synchronization without blocking
