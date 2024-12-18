@@ -81,7 +81,6 @@ protocol.print("AT+COMMAND\r\n");
 
 ```mermaid
 graph TB
-graph TB
     %% Application tasks/threads
     subgraph "Application Tasks"
         T1["Debug Task"]
@@ -92,14 +91,14 @@ graph TB
 
     %% Proxies
     subgraph "Serial Proxies"
-        P1["Debug Proxy<br>2×1KB buffers"]
-        P2["Protocol Proxy<br>2×512B buffers"]
-        P3["Log Proxy<br>2×1KB buffers"]
-        P4["Status Proxy<br>2×256B buffers"]
+        P1["Debug Proxy<br>"]
+        P2["Protocol Proxy<br>"]
+        P3["Log Proxy<br>"]
+        P4["Status Proxy<br>"]
     end
 
     %% AsyncSerial instances
-    subgraph "AsyncSerial Managers"
+    subgraph "AsyncSerial instances"
         AS1["AsyncSerial<br>(USB CDC)"]
         AS2["AsyncSerial<br>(UART)"]
     end
@@ -111,16 +110,16 @@ graph TB
     end
 
     %% Task to Proxy connections
-    T1 <--> P1
-    T2 <--> P2
-    T3 <--> P3
-    T4 <--> P4
+    T1 <-->|"Serial API"| P1
+    T2 <-->|"Serial API"| P2
+    T3 <-->|"Serial API"| P3
+    T4 <-->|"Serial API"| P4
 
     %% Proxy to AsyncSerial connections
-    P1 <--> AS1
-    P2 <--> AS2
-    P3 <--> AS1
-    P4 <--> AS2
+    P1 <-->|"RX/TX <br>RingBuffer"| AS1
+    P2 <-->|"RX/TX <br>RingBuffer"| AS2
+    P3 <-->|"RX/TX <br>RingBuffer"| AS1
+    P4 <-->|"RX/TX <br>RingBuffer"| AS2
 
     %% AsyncSerial to Physical Port connections
     AS1 <-->|"controls"| CDC
