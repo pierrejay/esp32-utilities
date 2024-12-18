@@ -15,6 +15,11 @@ class RingBuffer {
 public:
     RingBuffer() : _readIndex(0), _writeIndex(0), _count(0) {}
 
+    /**
+     * @brief Write a single element to the buffer
+     * @param data The element to write
+     * @return True if the element was successfully written, false if the buffer is full
+     */
     bool write(const T& data) {
         if (_count >= SIZE) return false;
         _buffer[_writeIndex] = data;
@@ -23,6 +28,12 @@ public:
         return true;
     }
 
+    /**
+     * @brief Write multiple elements to the buffer
+     * @param data Pointer to the data array
+     * @param length Number of elements to write
+     * @return True if all elements were successfully written, false if the buffer does not have enough space
+     */
     bool write(const T* data, size_t length) {
         if (_count + length > SIZE) return false;
         for (size_t i = 0; i < length; i++) {
@@ -33,6 +44,11 @@ public:
         return true;
     }
 
+    /**
+     * @brief Read a single element from the buffer
+     * @param data Reference to store the read element
+     * @return True if an element was successfully read, false if the buffer is empty
+     */
     bool read(T& data) {
         if (_count == 0) return false;
         data = _buffer[_readIndex];
@@ -41,13 +57,26 @@ public:
         return true;
     }
 
+    /**
+     * @brief Peek at the next element in the buffer without removing it
+     * @param data Reference to store the peeked element
+     * @return True if an element was successfully peeked, false if the buffer is empty
+     */
     bool peek(T& data) const {
         if (_count == 0) return false;
         data = _buffer[_readIndex];
         return true;
     }
 
+    /**
+     * @brief Get the number of elements currently in the buffer
+     * @return The number of elements in the buffer
+     */
     size_t available() const { return _count; }
+
+    /**
+     * @brief Clear the buffer
+     */
     void clear() { _readIndex = _writeIndex = _count = 0; }
 
 private:
@@ -74,11 +103,38 @@ public:
     explicit SerialProxy(uint32_t interMessageDelay = 5)
         : _rxBuffer(), _txBuffer(), _interMessageDelay(interMessageDelay) {}
 
+    /**
+     * @brief Get the inter-message delay
+     * @return The inter-message delay in milliseconds
+     */
     uint32_t getInterMessageDelay() const override { return _interMessageDelay; }
+
+    /**
+     * @brief Push data to the receive buffer
+     * @param data The data to push
+     * @return True if the data was successfully pushed, false if the buffer is full
+     */
     bool pushToRx(uint8_t data) override { return _rxBuffer.write(data); }
+
+    /**
+     * @brief Read data from the transmit buffer
+     * @param data Reference to store the read data
+     * @return True if data was successfully read, false if the buffer is empty
+     */
     bool readFromTx(uint8_t& data) override { return _txBuffer.read(data); }
+
+    /**
+     * @brief Get the number of bytes available for writing
+     * @return The number of bytes available for writing
+     */
     size_t txAvailable() const override { return _txBuffer.available(); }
 
+    /**
+     * @brief Flush the transmit buffer
+     */
+    void flush() override { AsyncSerial::getInstance().flush(this); }
+
+    // Stream methods for drop-in compatibility
     int available() override { return _rxBuffer.available(); }
     int read() override {
         uint8_t data;
@@ -89,38 +145,43 @@ public:
         return _rxBuffer.peek(data) ? data : -1;
     }
     size_t write(uint8_t data) override { return _txBuffer.write(data) ? 1 : 0; }
-
     bool write(const Bytes& data) { return _txBuffer.write(data.data(), data.size()); }
     bool write(const String& data) { return _txBuffer.write((const uint8_t*)data.c_str(), data.length()); }
-
-    void flush() override { AsyncSerial::getInstance().flush(this); }
-
-    // Méthodes de configuration
-    void begin(unsigned long baud) {
-        // Ne fait rien, l'initialisation doit être faite via AsyncSerial::getInstance().begin()
-    }
-    void begin(unsigned long baud, uint16_t config) {
-        // Ne fait rien, l'initialisation doit être faite via AsyncSerial::getInstance().begin()
-    }
-    void end() {
-        // Ne fait rien, la terminaison doit être faite via AsyncSerial::getInstance().end()
-    }
-
-    // Additional write methods for compatibility
-    size_t write(const uint8_t *buffer, size_t size) override { 
-        return _txBuffer.write(buffer, size) ? size : 0; 
-    }
-
-    // Timeout configuration methods
+    size_t write(const uint8_t *buffer, size_t size) override { return _txBuffer.write(buffer, size) ? size : 0; }
     void setTimeout(unsigned long timeout) { _timeout = timeout; }
     unsigned long getTimeout() const { return _timeout; }
-
-    // Missing method for compatibility with Stream
     int availableForWrite() override {
         return BUFFER_SIZE - _txBuffer.available();
     }
 
-    // Block reading methods with timeout
+    // Unused methods but implemented for compatibility
+    bool find(char *target) { return false; }
+    bool find(uint8_t *target, size_t length) { return false; }
+    bool findUntil(char *target, char *terminator) { return false; }
+    bool findUntil(uint8_t *target, size_t targetLen, char *terminator, size_t termLen) { return false; }
+    float parseFloat() { return 0.0f; }
+    long parseInt() { return 0L; }
+    long parseInt(char skipChar) { return 0L; }
+
+    // Configuration methods
+    void begin(unsigned long baud) {
+        // Do nothing, the initialization must be done via AsyncSerial::getInstance().begin()
+    }
+    void begin(unsigned long baud, uint16_t config) {
+        // Do nothing, the initialization must be done via AsyncSerial::getInstance().begin()
+    }
+    void end() {
+        // Do nothing, the termination must be done via AsyncSerial::getInstance().end()
+    }
+
+    // Extended methods to allow bulk (Bytes or String) reading/writing
+
+    /**
+     * @brief Read bytes from the serial port with a timeout
+     * @param buffer Pointer to the buffer to store the read bytes
+     * @param length Maximum number of bytes to read
+     * @return Number of bytes actually read
+     */
     size_t readBytes(uint8_t *buffer, size_t length) {
         size_t count = 0;
         unsigned long startMillis = millis();
@@ -137,6 +198,13 @@ public:
         return count;
     }
 
+    /**
+     * @brief Read bytes from the serial port until a terminator is encountered
+     * @param terminator The character to look for
+     * @param buffer Pointer to the buffer to store the read bytes
+     * @param length Maximum number of bytes to read
+     * @return Number of bytes actually read
+     */
     size_t readBytesUntil(char terminator, uint8_t *buffer, size_t length) {
         if (length < 1) return 0;
         
@@ -158,6 +226,10 @@ public:
         return count;
     }
 
+    /**
+     * @brief Read a string from the serial port until a timeout occurs
+     * @return The string read from the serial port
+     */
     String readString() {
         String ret;
         unsigned long startMillis = millis();
@@ -174,6 +246,11 @@ public:
         return ret;
     }
 
+    /**
+     * @brief Read a string from the serial port until a terminator is encountered
+     * @param terminator The character to look for
+     * @return The string read from the serial port
+     */
     String readStringUntil(char terminator) {
         String ret;
         unsigned long startMillis = millis();
@@ -192,15 +269,6 @@ public:
         return ret;
     }
 
-    // Unused methods but implemented for compatibility
-    bool find(char *target) { return false; }
-    bool find(uint8_t *target, size_t length) { return false; }
-    bool findUntil(char *target, char *terminator) { return false; }
-    bool findUntil(uint8_t *target, size_t targetLen, char *terminator, size_t termLen) { return false; }
-    float parseFloat() { return 0.0f; }
-    long parseInt() { return 0L; }
-    long parseInt(char skipChar) { return 0L; }
-
 private:
     RingBuffer<uint8_t, BUFFER_SIZE> _rxBuffer;
     RingBuffer<uint8_t, BUFFER_SIZE> _txBuffer;
@@ -216,6 +284,12 @@ public:
 
     CooperativeLock() : _owner(nullptr) {}
 
+    /**
+     * @brief Acquire the lock
+     * @param owner The owner of the lock
+     * @param poll The poll callback to call while waiting for the lock
+     * @return True if the lock was acquired, false if it was already owned
+     */
     bool acquire(T* owner, PollCallback poll) {
         T* expected = nullptr;
         while (!_owner.compare_exchange_weak(expected, owner)) {
@@ -225,12 +299,26 @@ public:
         return true;
     }
 
+    /**
+     * @brief Release the lock
+     * @param owner The owner of the lock
+     */
     void release(T* owner) {
         T* expected = owner;
         _owner.compare_exchange_strong(expected, nullptr);
     }
 
+    /**
+     * @brief Check if the lock is owned by a specific owner
+     * @param owner The owner to check
+     * @return True if the lock is owned by the specified owner, false otherwise
+     */
     bool isOwnedBy(T* owner) const { return _owner.load() == owner; }
+
+    /**
+     * @brief Get the owner of the lock
+     * @return The owner of the lock
+     */
     T* getOwner() const { return _owner.load(); }
 
 private:
@@ -254,18 +342,32 @@ private:
  */
 class AsyncSerial {
 public:
+    /**
+     * @brief Get the singleton instance of AsyncSerial
+     * @return The singleton instance of AsyncSerial
+     */
     static AsyncSerial& getInstance() {
         static AsyncSerial instance;
         return instance;
     }
 
+    /**
+     * @brief Register a proxy to the serial port
+     * @param proxy The proxy to register
+     * @return True if the proxy was successfully registered, false if the maximum number of proxies is reached
+     */
     bool registerProxy(SerialProxyBase* proxy) {
         if (_proxyCount >= MAX_PROXIES) return false;
         _proxies[_proxyCount++] = {proxy, 0, false};
         return true;
     }
 
-   bool flush(SerialProxyBase* proxy) {
+    /**
+     * @brief Flush the serial port
+     * @param proxy The proxy to flush
+     * @return True if the flush was successful, false if a timeout occurred
+     */
+    bool flush(SerialProxyBase* proxy) {
         // Immediately acquire the lock
         _flushLock.acquire(proxy, [this]() { poll(); });
 
@@ -292,6 +394,9 @@ public:
         return true;  // Flush réussi
     }
 
+    /**
+     * @brief Process the AsyncSerial state machine to handle reading and writing operations
+     */
     void poll() {
         unsigned long now = millis();
 
@@ -383,10 +488,17 @@ public:
         }
     }
 
+    /**
+     * @brief Initialize the serial port
+     * @param baud The baud rate to use
+     */
     void begin(unsigned long baud) {
         Serial.begin(baud);
     }
 
+    /**
+     * @brief Terminate the serial port
+     */
     void end() {
         Serial.end();
     }
@@ -399,6 +511,9 @@ private:
 
     enum class State { IDLE, READ, WRITE, FLUSH };
 
+    /**
+     * @brief Structure to hold the state of a proxy
+     */
     struct ProxyState {
         SerialProxyBase* proxy;
         unsigned long lastTxTime;
@@ -410,6 +525,10 @@ private:
     ProxyState _proxies[MAX_PROXIES];
     size_t _proxyCount = 0;
 
+    /**
+     * @brief Send a chunk of data to the serial port
+     * @param proxy The proxy to send the data from
+     */
     void sendChunk(SerialProxyBase* proxy) {
         size_t availableSpace = Serial.availableForWrite();
         if (availableSpace == 0) return;  // Nothing to send if the serial buffer is full
