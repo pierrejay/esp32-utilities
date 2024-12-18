@@ -94,6 +94,12 @@ public:
     virtual bool pushToRx(uint8_t data) = 0;
     virtual bool readFromTx(uint8_t& data) = 0;
     virtual size_t txAvailable() const = 0;
+    
+    // Nouvelle méthode virtuelle pour définir l'instance AsyncSerial
+    virtual void setAsyncSerial(AsyncSerial* async) = 0;
+
+protected:
+    AsyncSerial* _async = nullptr;
 };
 
 // ============================== SerialProxy ==============================
@@ -101,7 +107,7 @@ template<size_t BUFFER_SIZE = 1024>
 class SerialProxy : public SerialProxyBase {
 public:
     explicit SerialProxy(uint32_t interMessageDelay = 5)
-        : _rxBuffer(), _txBuffer(), _interMessageDelay(interMessageDelay) {}
+        : _rxBuffer(), _txBuffer(), _interMessageDelay(interMessageDelay), _async(nullptr) {}
 
     /**
      * @brief Get the inter-message delay
@@ -132,7 +138,9 @@ public:
     /**
      * @brief Flush the transmit buffer
      */
-    void flush() override { AsyncSerial::getInstance().flush(this); }
+    void flush() override { 
+        if (_async) _async->flush(this); 
+    }
 
     // Stream methods for drop-in compatibility
     int available() override { return _rxBuffer.available(); }
@@ -191,9 +199,9 @@ public:
             
             if (available()) {
                 buffer[count++] = read();
-                startMillis = millis(); // Reset timeout on successful read
+                startMillis = millis();
             }
-            AsyncSerial::getInstance().poll();
+            if (_async) _async->poll();
         }
         return count;
     }
@@ -220,9 +228,9 @@ public:
                 buffer[count++] = c;
                 startMillis = millis();
             }
-            AsyncSerial::getInstance().poll();
+            if (_async) _async->poll();
         }
-        buffer[count] = 0; // Null-terminate
+        buffer[count] = 0;
         return count;
     }
 
@@ -241,7 +249,7 @@ public:
                 ret += (char)read();
                 startMillis = millis();
             }
-            AsyncSerial::getInstance().poll();
+            if (_async) _async->poll();
         }
         return ret;
     }
@@ -264,16 +272,20 @@ public:
                 ret += c;
                 startMillis = millis();
             }
-            AsyncSerial::getInstance().poll();
+            if (_async) _async->poll();
         }
         return ret;
     }
+
+    void setAsyncSerial(AsyncSerial* async) override { _async = async; }
 
 private:
     RingBuffer<uint8_t, BUFFER_SIZE> _rxBuffer;
     RingBuffer<uint8_t, BUFFER_SIZE> _txBuffer;
     const uint32_t _interMessageDelay;
-    unsigned long _timeout = 1000; // Timeout par défaut de 1 seconde
+    unsigned long _timeout = 1000;
+    // Supprimé car maintenant hérité de SerialProxyBase
+    // AsyncSerial* _async;
 };
 
 // ============================== CooperativeLock ==============================
@@ -326,30 +338,20 @@ private:
 };
 
 // ============================== AsyncSerial ==============================
-/**
- * @class AsyncSerial
- * @brief Singleton class managing asynchronous access to the hardware serial port.
- * 
- * This class implements the Singleton pattern to ensure only one instance
- * manages the hardware serial port. Access it via AsyncSerial::getInstance().
- * 
- * Thread-safety notes:
- * - getInstance(): Thread-safe (C++11 static initialization)
- * - flush(): Thread-safe (protected by CooperativeLock)
- * - poll(): Thread-safe when used as intended
- * - begin()/end(): Not thread-safe, should be called once at startup/shutdown
- * - registerProxy(): Not thread-safe, should be called once per proxy at initialization
- */
 class AsyncSerial {
 public:
+
     /**
-     * @brief Get the singleton instance of AsyncSerial
-     * @return The singleton instance of AsyncSerial
+     * @brief Construct an AsyncSerial instance for a HardwareSerial port
+     * @param serial The HardwareSerial port to use (e.g. on ESP32: Serial1, Serial2...)
      */
-    static AsyncSerial& getInstance() {
-        static AsyncSerial instance;
-        return instance;
-    }
+    explicit AsyncSerial(HardwareSerial& serial) : _port(&serial), _isCDC(false) {}
+
+    /**
+     * @brief Construct an AsyncSerial instance for a CDC port
+     * @param serial The CDC port to use (e.g. on ESP32: Serial)
+     */
+    explicit AsyncSerial(HWCDC& serial) : _port(&serial), _isCDC(true) {}
 
     /**
      * @brief Register a proxy to the serial port
@@ -358,6 +360,7 @@ public:
      */
     bool registerProxy(SerialProxyBase* proxy) {
         if (_proxyCount >= MAX_PROXIES) return false;
+        proxy->setAsyncSerial(this);  // Association du proxy avec cette instance
         _proxies[_proxyCount++] = {proxy, 0, false};
         return true;
     }
@@ -403,7 +406,7 @@ public:
         switch (_state) {
             case State::IDLE:
                 // Transition to READ if serial data is available
-                if (Serial.available()) {
+                if (_port->available()) {
                     _state = State::READ;
                 }
                 // Transition to WRITE if a proxy has data ready
@@ -421,14 +424,14 @@ public:
 
             case State::READ: {
                 size_t bytesRead = 0;
-                while (Serial.available() && bytesRead < RX_CHUNK_SIZE) {
-                    uint8_t data = Serial.read();
+                while (_port->available() && bytesRead < RX_CHUNK_SIZE) {
+                    uint8_t data = _port->read();
                     for (size_t i = 0; i < _proxyCount; i++) {
                         _proxies[i].proxy->pushToRx(data);
                     }
                     bytesRead++;
                 }
-                _state = Serial.available() ? State::READ : State::IDLE;
+                _state = _port->available() ? State::READ : State::IDLE;
                 break;
             }
 
@@ -463,7 +466,7 @@ public:
                 SerialProxyBase* proxy = _flushLock.getOwner();
                 unsigned long startTime = millis();
 
-                Serial.flush();  // Ensure the serial buffer is empty before starting
+                _port->flush();  // Ensure the serial buffer is empty before starting
 
                 // Empty the proxy buffer chunk by chunk
                 while (proxy->txAvailable() > 0) {
@@ -475,7 +478,7 @@ public:
                     }
                 }
 
-                Serial.flush();  // Ensure the last chunk is transmitted
+                _port->flush();  // Ensure the last chunk is transmitted
 
                 // Check if the proxy buffer is empty
                 if (proxy->txAvailable() == 0) {
@@ -493,18 +496,23 @@ public:
      * @param baud The baud rate to use
      */
     void begin(unsigned long baud) {
-        Serial.begin(baud);
+        if (_isCDC) {
+            static_cast<HWCDC*>(_port)->begin();
+        } else {
+            static_cast<HardwareSerial*>(_port)->begin(baud);
+        }
     }
 
     /**
      * @brief Terminate the serial port
      */
     void end() {
-        Serial.end();
+        if (!_isCDC) {
+            static_cast<HardwareSerial*>(_port)->end();
+        }
     }
 
 private:
-    AsyncSerial() = default;
 
     static constexpr size_t RX_CHUNK_SIZE = 256;
     static constexpr unsigned long SERIAL_TIMEOUT = 1000;
@@ -530,11 +538,10 @@ private:
      * @param proxy The proxy to send the data from
      */
     void sendChunk(SerialProxyBase* proxy) {
-        size_t availableSpace = Serial.availableForWrite();
-        if (availableSpace == 0) return;  // Nothing to send if the serial buffer is full
+        size_t availableSpace = _port->availableForWrite();
+        if (availableSpace == 0) return;
 
         size_t toSend = min(availableSpace, proxy->txAvailable());
-
         uint8_t chunk[toSend];
         size_t bytesRead = 0;
 
@@ -544,10 +551,12 @@ private:
         }
 
         if (bytesRead > 0) {
-            Serial.write(chunk, bytesRead);
+            _port->write(chunk, bytesRead);
         }
     }
 
+    Stream* _port;
+    bool _isCDC;
 };
 
 #endif // ASYNCSERIAL_H

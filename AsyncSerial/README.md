@@ -10,33 +10,61 @@
 
 ## Core Concepts
 
+### Port Management
+AsyncSerial takes complete ownership of a physical serial port (USB CDC or Hardware UART):
+- The physical port should never be accessed directly after initialization
+- All communication must go through AsyncSerial's proxy mechanism
+- Multiple AsyncSerial instances can manage different physical ports
+- Built-in mechanisms prevent race conditions on port access
+
 ### Drop-in Serial Replacement
-AsyncSerial is designed to be a direct replacement for Arduino's Serial interface:
-- Each SerialProxy implements the standard `Stream` interface
+Each SerialProxy provides a safe, thread-friendly replacement for direct Serial access:
+- Implements the standard `Stream` interface
 - Identical method signatures (`print`, `println`, `write`, `read`, `available`, etc.)
 - Compatible with existing libraries that use Serial communication
 - Same behavior for string formatting and special characters handling
+- Thread-safe by design through internal buffering and state management
 
 ### Multiple Proxies
-- Up to 8 independent logical serial streams sharing a single physical UART
+Each AsyncSerial instance supports up to 8 independent logical streams (proxies) sharing a single physical port:
 - Each proxy operates independently with its own:
   - TX/RX buffers
   - Inter-message delays
   - Flush behavior
+- Safe concurrent access from different tasks/threads
+- Messages from different proxies are automatically multiplexed
 
 ### Thread Safety
 Non-blocking collaboration between threads through `CooperativeLock`, ideal for:
 - RTOS environments
 - Cooperative multitasking
 - Interrupt-driven architectures
+- Ensures safe concurrent access without deadlocks
 
 ## Key Components
 
 ### 1. AsyncSerial
 The main driver class managing the physical UART:
-- Multiplexes data between physical UART and logical proxies
-- Maintains a state machine for UART operations
+- Handles both hardware UART and USB CDC ports
+- Multiplexes data between physical ports and logical proxies
+- Maintains a state machine for serial operations
 - Handles priority and timing
+
+```cpp
+// Create instances for different ports
+AsyncSerial usbSerial(Serial);    // For USB CDC port
+AsyncSerial uart1(Serial1);       // For hardware UART port
+AsyncSerial uart2(Serial2);       // For another hardware UART port
+
+// Initialization
+usbSerial.begin(115200);  // Baudrate ignored for CDC
+uart1.begin(115200);      // Configure UART
+uart2.begin(9600);        // Different speeds possible
+
+// Register proxies to specific ports
+usbSerial.registerProxy(&debugProxy);
+uart1.registerProxy(&protocolProxy);
+```
 
 ### 2. SerialProxy
 A virtual serial port implementing the `Stream` interface:
@@ -47,6 +75,59 @@ SerialProxy<256> protocol;  // 256B buffer
 // Use exactly like Serial:
 console.println("Debug message");
 protocol.print("AT+COMMAND\r\n");
+```
+
+### Illustration
+
+```mermaid
+graph TB
+    %% Application tasks/threads
+    subgraph "Application Tasks"
+        T1["Debug Task"]
+        T2["Protocol Task"]
+        T3["Logging Task"]
+        T4["Status Task"]
+    end
+
+    %% Proxies
+    subgraph "Serial Proxies"
+        P1["Debug Proxy<br>1KB buffer"]
+        P2["Protocol Proxy<br>512B buffer"]
+        P3["Log Proxy<br>1KB buffer"]
+        P4["Status Proxy<br>256B buffer"]
+    end
+
+    %% AsyncSerial instances
+    subgraph "AsyncSerial Managers"
+        AS1["AsyncSerial<br>(USB CDC)"]
+        AS2["AsyncSerial<br>(UART)"]
+    end
+
+    %% Physical ports
+    subgraph "Physical Ports"
+        CDC["USB CDC Port<br>(Serial)"]
+        UART["UART Port<br>(Serial1)"]
+    end
+
+    %% Task to Proxy connections
+    T1 <--> P1
+    T2 <--> P2
+    T3 <--> P3
+    T4 <--> P4
+
+    %% Proxy to AsyncSerial connections
+    P1 <--> AS1
+    P2 <--> AS2
+    P3 <--> AS1
+    P4 <--> AS2
+
+    %% AsyncSerial to Physical Port connections
+    AS1 <-->|"controls"| CDC
+    AS2 <-->|"controls"| UART
+
+    %% Add notes
+    classDef note fill:#fff,stroke:#333,stroke-dasharray: 5 5
+    class CDC,UART note
 ```
 
 ### 3. RingBuffer & CooperativeLock
@@ -101,8 +182,8 @@ long parseInt(char skipChar)            // Always returns 0
 1. **Configuration Methods**
 ```cpp
 // These don't actually configure the hardware
-proxy.begin(9600);    // No effect - use AsyncSerial::getInstance().begin() instead
-proxy.end();          // No effect - use AsyncSerial::getInstance().end() instead
+proxy.begin(9600);    // No effect - use the AsyncSerial instance's begin() instead
+proxy.end();          // No effect - use the AsyncSerial instance's end() instead
 ```
 
 2. **Blocking Operations**
@@ -123,7 +204,6 @@ SerialProxy<1024> proxy;  // Buffer size must be defined at compile time
 ### Thread-Safe Operations
 ```cpp
 // Always thread-safe
-AsyncSerial::getInstance()  // Thread-safe singleton access
 proxy.flush()              // Protected by CooperativeLock
 AsyncSerial::poll()        // Thread-safe when used as intended
 ```
@@ -131,9 +211,9 @@ AsyncSerial::poll()        // Thread-safe when used as intended
 ### Non-Thread-Safe Operations
 ```cpp
 // Must be called only during initialization
-AsyncSerial::begin()
-AsyncSerial::end()
-AsyncSerial::registerProxy()
+asyncSerial.begin()
+asyncSerial.end()
+asyncSerial.registerProxy()
 
 // Must be synchronized externally if called from multiple threads (but all the point of this implementation is to allow one individual proxy per thread, so if you need to share a proxy between threads, you're probably doing something wrong)
 proxy.write()
@@ -143,17 +223,20 @@ proxy.available()
 
 ### Initialization Pattern
 ```cpp
-// 0. Declare proxies as global objects
+// 0. Declare global instances
+AsyncSerial usbSerial(Serial);
+AsyncSerial uart(Serial1);
 SerialProxy<1024> debugProxy;
 SerialProxy<512> protocolProxy;
 
 void setup() {
-    // 1. Initialize AsyncSerial first (non-thread-safe)
-    AsyncSerial::getInstance().begin(115200);
+    // 1. Initialize AsyncSerial instances (non-thread-safe)
+    usbSerial.begin(115200);
+    uart.begin(115200);
     
     // 2. Register all proxies (non-thread-safe)
-    AsyncSerial::getInstance().registerProxy(&debugProxy);
-    AsyncSerial::getInstance().registerProxy(&protocolProxy);
+    usbSerial.registerProxy(&debugProxy);
+    uart.registerProxy(&protocolProxy);
     
     // 3. After this, thread-safe operations can begin
     startTasks();  // If using RTOS
@@ -163,26 +246,40 @@ void setup() {
 ### RTOS Usage Notes
 ```cpp
 // Dedicated polling task (recommended)
-void serialPollTask(void* parameter) {
+void serialPollTask(void*) {
     for (;;) {
-        AsyncSerial::getInstance().poll();
+        // Poll all active serial ports
+        usbSerial.poll();
+        uart.poll();
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
 // Data handling task
-void dataTask(void* parameter) {
-    SerialProxy<512>& proxy = *((SerialProxy<512>*)parameter);
+void dataTask(void*) {
     for (;;) {
-        // Read/write operations need external synchronization
-        taskENTER_CRITICAL();
-        if (proxy.available()) {
-            String data = proxy.readString();
+        if (debugProxy.available()) {
+            String data = debugProxy.readString();
+            // Process data...
         }
-        taskEXIT_CRITICAL();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+```
+
+### Port Type Support
+
+#### USB CDC Port
+```cpp
+AsyncSerial usbSerial(Serial);  // USB CDC port
+usbSerial.begin(115200);        // Baudrate parameter is ignored
+```
+
+#### Hardware Serial Port
+```cpp
+AsyncSerial uart(Serial1);      // Hardware UART port
+uart.begin(115200);             // Configures the baudrate
+uart.begin(115200, SERIAL_8N1); // With additional configuration
 ```
 
 ### Best Practices for Thread Safety
@@ -226,33 +323,42 @@ The library operates in four states:
 ### With Existing Libraries
 ```cpp
 // Using with libraries that expect Serial
-class ModbusPort : public SerialProxy<512> {
-public:
-    ModbusPort() : SerialProxy<512>(10) {}  // 10ms delay
-};
+AsyncSerial modbusSerial(Serial2);
+SerialProxy<512> modbusProxy(10);  // 10ms delay
 
-ModbusPort modbusSerial;
-ModbusMaster node(1, modbusSerial);  // Works with ModbusMaster library
+void setup() {
+    modbusSerial.begin(9600);
+    modbusSerial.registerProxy(&modbusProxy);
+    
+    // Use with ModbusMaster
+    ModbusMaster node(1);
+    node.begin(9600, modbusProxy);
+}
 ```
 
-### In RTOS Environment
+### Multiple Port Management
 ```cpp
-void debugTask(void* parameter) {
-    SerialProxy<1024>& debug = *((SerialProxy<1024>*)parameter);
-    for (;;) {
-        debug.println("Task running...");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
+// Debug on USB CDC
+AsyncSerial debug(Serial);
+SerialProxy<1024> console;
 
-void protocolTask(void* parameter) {
-    SerialProxy<512>& protocol = *((SerialProxy<512>*)parameter);
-    for (;;) {
-        if (protocol.available()) {
-            processProtocolData(protocol);
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
+// Protocol on UART1
+AsyncSerial protocol(Serial1);
+SerialProxy<512> protocolPort;
+
+void setup() {
+    // Initialize ports
+    debug.begin(115200);
+    protocol.begin(9600);
+    
+    // Register proxies
+    debug.registerProxy(&console);
+    protocol.registerProxy(&protocolPort);
+    
+    // Start RTOS tasks
+    xTaskCreate(serialPollTask, "SerialPoll", 2048, NULL, 2, NULL);
+    xTaskCreate(consoleTask, "Console", 2048, NULL, 1, NULL);
+    xTaskCreate(protocolTask, "Protocol", 2048, NULL, 1, NULL);
 }
 ```
 
@@ -527,6 +633,7 @@ bool AsyncSerial::flush(SerialProxyBase* proxy) {
 class CustomProxy : public SerialProxyBase {
 private:
     CooperativeLock<CustomProxy> _txLock;
+    AsyncSerial& _serial;
     
     bool sendMessage(const String& msg) {
         // Try to acquire lock with custom work
@@ -534,7 +641,7 @@ private:
             // Process incoming data while waiting
             processRxBuffer();
             // Keep serial operations moving
-            AsyncSerial::getInstance().poll();
+            _serial.poll();
         });
         
         // Lock acquired, send message
@@ -564,10 +671,10 @@ lock.release(owner);
 #### 2. Useful Work in Callbacks
 ```cpp
 // Good - Productive waiting
-lock.acquire(&proxy, []() {
+lock.acquire(&proxy, [&serial]() {
     processIncoming();
     updateStatus();
-    AsyncSerial::getInstance().poll();
+    serial.poll();
 });
 
 // Bad - Busy waiting
@@ -613,31 +720,98 @@ public:
 
 ### Common Use Cases
 
-1. **Resource Protection**
+1. **Network Message Queue**
 ```cpp
-CooperativeLock<Resource> resourceLock;
+AsyncSerial uart(Serial1);
+CooperativeLock<MessageQueue> queueLock;
 
-void useResource(Resource* resource) {
-    resourceLock.acquire(resource, []() {
-        // Work while waiting
-        doOtherStuff();
-    });
-    // Resource is now protected
-    resource->use();
-    resourceLock.release(resource);
-}
+class MessageQueue {
+    Queue<Message> highPriorityQueue;
+    Queue<Message> lowPriorityQueue;
+
+public:
+    bool sendMessage(const Message& msg) {
+        queueLock.acquire(this, [this]() {
+            // Process high-priority messages while waiting
+            if (highPriorityQueue.available()) {
+                processHighPriorityMessage();
+            }
+            handleBackgroundTasks();
+        });
+
+        // Now safely add to queue
+        lowPriorityQueue.push(msg);
+        queueLock.release(this);
+        return true;
+    }
+};
 ```
 
-2. **State Synchronization**
+2. **Sensor Data Collection**
 ```cpp
-CooperativeLock<State> stateLock;
+AsyncSerial debug(Serial);
+CooperativeLock<SensorManager> sensorLock;
 
-void updateState(State* state) {
-    stateLock.acquire(state, []() {
-        // Keep system responsive
-        AsyncSerial::getInstance().poll();
-    });
-    state->update();
-    stateLock.release(state);
-}
+class SensorManager {
+    CircularBuffer<SensorData> buffer;
+    BME280 tempSensor;
+    LSM6DS3 imuSensor;
+
+public:
+    bool writeSensorData(const SensorData& newData) {
+        sensorLock.acquire(this, [this]() {
+            // Keep reading other sensors while waiting
+            tempSensor.readTemperature();  // Quick I2C read
+            imuSensor.readAcceleration();  // Keep IMU data fresh
+            updateMovingAverage();         // Process existing data
+        });
+
+        buffer.push(newData);
+        sensorLock.release(this);
+        return true;
+    }
+};
 ```
+
+3. **UI Event Handler**
+```cpp
+AsyncSerial debug(Serial);
+CooperativeLock<UIManager> uiLock;
+
+class UIManager {
+    TouchScreen touch;
+    EventQueue uiEvents;
+
+public:
+    bool updateDisplay(const ScreenUpdate& update) {
+        uiLock.acquire(this, [this]() {
+            // Handle touch events while waiting
+            if (touch.available()) {
+                processTouchEvent();
+            }
+            // Update LED indicators
+            updateStatusLEDs();
+            // Check button states
+            scanButtons();
+        });
+
+        display.update(update);
+        uiLock.release(this);
+        return true;
+    }
+};
+```
+
+Each example shows:
+- Different types of useful work during lock waiting
+- Mixing fast operations (sensor reads, checks) with calculations
+- Safety monitoring and background tasks
+- Data processing and state updates
+- Multiple subsystem coordination
+
+The key is to use the waiting time to perform quick, useful operations that:
+- Don't require the locked resource
+- Keep the system responsive and safe
+- Maintain data freshness
+- Process background tasks
+- Monitor system health
