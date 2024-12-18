@@ -82,7 +82,7 @@ protocol.print("AT+COMMAND\r\n");
 ```mermaid
 graph TB
     %% Application tasks/threads
-    subgraph "Application Tasks"
+    subgraph APP["Application Tasks"]
         T1["Debug Task"]
         T2["Protocol Task"]
         T3["Logging Task"]
@@ -98,13 +98,13 @@ graph TB
     end
 
     %% AsyncSerial instances
-    subgraph "AsyncSerial instances"
+    subgraph ASS["AsyncSerial instances"]
         AS1["AsyncSerial<br>(USB CDC)"]
         AS2["AsyncSerial<br>(UART)"]
     end
 
     %% Physical ports
-    subgraph "Physical Ports"
+    subgraph PHY["Physical Ports"]
         CDC["USB CDC Port<br>(Serial)"]
         UART["UART Port<br>(Serial1)"]
     end
@@ -116,10 +116,10 @@ graph TB
     T4 <-->|"Serial API"| P4
 
     %% Proxy to AsyncSerial connections
-    P1 <-->|"RX/TX <br>RingBuffer"| AS1
-    P2 <-->|"RX/TX <br>RingBuffer"| AS2
-    P3 <-->|"RX/TX <br>RingBuffer"| AS1
-    P4 <-->|"RX/TX <br>RingBuffer"| AS2
+    P1 <-->|"RX/TX<br> RingBuffer"| AS1
+    P2 <-->|"RX/TX<br> RingBuffer"| AS2
+    P3 <-->|"RX/TX<br> RingBuffer"| AS1
+    P4 <-->|"RX/TX<br> RingBuffer"| AS2
 
     %% AsyncSerial to Physical Port connections
     AS1 <-->|"controls"| CDC
@@ -127,7 +127,7 @@ graph TB
 
     %% Add notes
     classDef note stroke-dasharray: 5 5
-    class CDC,UART note
+    class APP,PHY,CDC,UART,T1,T2,T3,T4 note
 ```
 
 ### 3. RingBuffer & CooperativeLock

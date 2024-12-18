@@ -359,6 +359,7 @@ public:
      * @return True if the proxy was successfully registered, false if the maximum number of proxies is reached
      */
     bool registerProxy(SerialProxyBase* proxy) {
+        if (!proxy) return false;  // Early return if proxy is null
         if (_proxyCount >= MAX_PROXIES) return false;
         proxy->setAsyncSerial(this);  // Association du proxy avec cette instance
         _proxies[_proxyCount++] = {proxy, 0, false};
@@ -371,6 +372,8 @@ public:
      * @return True if the flush was successful, false if a timeout occurred
      */
     bool flush(SerialProxyBase* proxy) {
+        if (!proxy) return false;  // Early return if proxy is null
+        
         // Immediately acquire the lock
         _flushLock.acquire(proxy, [this]() { poll(); });
 
@@ -418,7 +421,9 @@ public:
                             break;
                         }
                     }
-                    if (_state == State::IDLE) delay(1);  // Free the CPU if no active proxy
+                    if (_state == State::IDLE) {
+                        yield();
+                    }
                 }
                 break;
 
@@ -464,6 +469,11 @@ public:
 
             case State::FLUSH: {
                 SerialProxyBase* proxy = _flushLock.getOwner();
+                if (!proxy) {
+                    _state = State::IDLE;  // Return to IDLE if proxy is null
+                    break;
+                }
+                
                 unsigned long startTime = millis();
 
                 _port->flush();  // Ensure the serial buffer is empty before starting
@@ -538,6 +548,8 @@ private:
      * @param proxy The proxy to send the data from
      */
     void sendChunk(SerialProxyBase* proxy) {
+        if (!proxy) return;  // Early return if proxy is null
+        
         size_t availableSpace = _port->availableForWrite();
         if (availableSpace == 0) return;
 
