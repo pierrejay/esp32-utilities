@@ -81,6 +81,7 @@ protocol.print("AT+COMMAND\r\n");
 
 ```mermaid
 graph TB
+graph TB
     %% Application tasks/threads
     subgraph "Application Tasks"
         T1["Debug Task"]
@@ -91,10 +92,10 @@ graph TB
 
     %% Proxies
     subgraph "Serial Proxies"
-        P1["Debug Proxy<br>1KB buffer"]
-        P2["Protocol Proxy<br>512B buffer"]
-        P3["Log Proxy<br>1KB buffer"]
-        P4["Status Proxy<br>256B buffer"]
+        P1["Debug Proxy<br>2×1KB buffers"]
+        P2["Protocol Proxy<br>2×512B buffers"]
+        P3["Log Proxy<br>2×1KB buffers"]
+        P4["Status Proxy<br>2×256B buffers"]
     end
 
     %% AsyncSerial instances
@@ -126,7 +127,7 @@ graph TB
     AS2 <-->|"controls"| UART
 
     %% Add notes
-    classDef note fill:#fff,stroke:#333,stroke-dasharray: 5 5
+    classDef note stroke-dasharray: 5 5
     class CDC,UART note
 ```
 
