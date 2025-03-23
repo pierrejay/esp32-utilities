@@ -42,7 +42,7 @@ A high-performance pulse counting library for ESP32 microcontrollers that levera
 ### Basic Setup
 
 ```cpp
-#include "ESP32PulseLib.h"
+#include "PulseCounter.h"
 
 // Initialize counter on GPIO 5, using PCNT_UNIT_0
 PulseCounter counter(5);
