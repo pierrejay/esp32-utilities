@@ -136,6 +136,22 @@ Changes the sample time for frequency calculations.
 #### `uint32_t getSampleTime()`
 Returns current sample time in milliseconds.
 
+### Compilation issues
+
+In large codebases, you may encounter compilation issues such as :
+
+```
+(...) dangerous relocation: l32r: literal placed after use: (...) 
+```
+
+To fix this, you should add the following compile flags (for example in `platformio.ini`):
+
+```
+build_flags =
+	-mtext-section-literals
+```
+
+
 ## Implementation Details
 
 ### Global Polling System
@@ -151,6 +167,8 @@ At a 1 ms interval, the library can handle signals with up to 3 MHz pulse freque
 You can override this value by providing an argument when starting polling if you need higher frequencies, or to further decrease CPU load in case of lower frequencies :
 `static void startPolling(uint32_t intervalUs = 1000)`
 
+The frequency calculation does not live in the polling ISR, but in a dedicated task that is automatically triggered at an interval of `minSampleTimeMs / 2` (`minSampleTimeMs` being the shortest sample time of all counters), in order to reduce the ISR overhead as much as possible while still being able to calculate the frequency accurately.
+
 ### Counter Management
 - Static array manages up to 8 counter instances
 - Automatic counter registration and cleanup
@@ -160,8 +178,8 @@ You can override this value by providing an argument when starting polling if yo
 ### Frequency Calculation
 - Based on pulse count delta over sample time
 - Uses esp_timer_get_time() for microsecond precision
-- Includes signal presence detection
 - Updates only when valid signal detected
+- Uses a dedicated task to reduce polling ISR overhead
 
 ## Performance & Limitations
 
